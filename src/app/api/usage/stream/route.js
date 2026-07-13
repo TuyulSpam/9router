@@ -1,16 +1,16 @@
-import { getUsageStats, statsEmitter, getActiveRequests } from "@/lib/usageDb";
+import { statsEmitter, getActiveRequests } from "@/lib/usageDb";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(request) {
   const encoder = new TextEncoder();
-  const state = { closed: false, keepalive: null, send: null, sendPending: null, cachedStats: null };
+  const state = { closed: false, keepalive: null, send: null, sending: false, queued: false };
 
   const cleanup = () => {
     if (state.closed) return;
     state.closed = true;
     if (state.send) statsEmitter.off("update", state.send);
-    if (state.sendPending) statsEmitter.off("pending", state.sendPending);
+    if (state.send) statsEmitter.off("pending", state.send);
     if (state.keepalive) clearInterval(state.keepalive);
   };
 
@@ -19,45 +19,38 @@ export async function GET(request) {
 
   const stream = new ReadableStream({
     async start(controller) {
-      // Full stats refresh (heavy) + immediate lightweight push
       state.send = async () => {
         if (state.closed) return;
+        if (state.sending) {
+          state.queued = true;
+          return;
+        }
+
+        state.sending = true;
         try {
-          // Push lightweight update immediately so UI reflects changes fast
-          if (state.cachedStats) {
-            const { activeRequests, recentRequests, errorProvider } = await getActiveRequests();
+          do {
+            state.queued = false;
+            const stats = await getActiveRequests();
             if (state.closed) return;
-            const quickStats = { ...state.cachedStats, activeRequests, recentRequests, errorProvider };
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(quickStats)}\n\n`));
-          }
-          // Then do full recalc and update cache
-          const stats = await getUsageStats();
-          if (state.closed) return;
-          state.cachedStats = stats;
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(stats)}\n\n`));
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(stats)}\n\n`));
+          } while (!state.closed && state.queued);
         } catch {
           cleanup();
+        } finally {
+          state.sending = false;
         }
       };
 
-      // Lightweight push: only refresh activeRequests + recentRequests on pending changes
-      state.sendPending = async () => {
-        if (state.closed || !state.cachedStats) return;
-        try {
-          const { activeRequests, recentRequests, errorProvider } = await getActiveRequests();
-          if (state.closed) return;
-          const stats = { ...state.cachedStats, activeRequests, recentRequests, errorProvider };
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(stats)}\n\n`));
-        } catch {
-          cleanup();
-        }
-      };
+      if (state.closed) {
+        controller.close();
+        return;
+      }
+
+      statsEmitter.on("update", state.send);
+      statsEmitter.on("pending", state.send);
 
       await state.send();
       if (state.closed) return;
-
-      statsEmitter.on("update", state.send);
-      statsEmitter.on("pending", state.sendPending);
 
       state.keepalive = setInterval(() => {
         if (state.closed) { clearInterval(state.keepalive); return; }
