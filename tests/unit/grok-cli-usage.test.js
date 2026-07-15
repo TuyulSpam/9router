@@ -18,7 +18,7 @@ function jsonResponse(body, status = 200) {
   });
 }
 
-/** Free/promo exhausted: no percent fields, onDemandCap=0 (legacy path). */
+/** Free/promo exhausted: no percent fields, onDemandCap=0 (legacy non-unified path). */
 const EXHAUSTED_BILLING = {
   config: {
     currentPeriod: {
@@ -28,11 +28,31 @@ const EXHAUSTED_BILLING = {
     },
     onDemandCap: { val: 0 },
     onDemandUsed: { val: 0 },
-    isUnifiedBillingUser: true,
+    isUnifiedBillingUser: false,
     prepaidBalance: { val: 0 },
     topUpMethod: "TOP_UP_METHOD_SAVED_PAYMENT_METHOD",
     billingPeriodStart: "2026-07-08T00:00:00+00:00",
     billingPeriodEnd: "2026-07-15T00:00:00+00:00",
+  },
+};
+
+/**
+ * Live Grok Pro / unified shape without productUsage or creditUsagePercent —
+ * only onDemandCap=0 on credits endpoint; monthly lives on plain /v1/billing.
+ */
+const UNIFIED_NO_PERCENT_BILLING = {
+  config: {
+    currentPeriod: {
+      type: "USAGE_PERIOD_TYPE_WEEKLY",
+      start: "2026-07-09T23:57:32.954938+00:00",
+      end: "2026-07-16T23:57:32.954938+00:00",
+    },
+    onDemandCap: { val: 0 },
+    onDemandUsed: { val: 0 },
+    isUnifiedBillingUser: true,
+    prepaidBalance: { val: 0 },
+    billingPeriodStart: "2026-07-09T23:57:32.954938+00:00",
+    billingPeriodEnd: "2026-07-16T23:57:32.954938+00:00",
   },
 };
 
@@ -218,6 +238,20 @@ describe("parseGrokCliBilling", () => {
     const parsed = parseGrokCliBilling(EXHAUSTED_BILLING, USER_PROFILE);
     expect(parsed.quotas["On-demand"].remainingPercentage).toBe(0);
     expect(parsed.exhausted).toBe(true);
+  });
+
+  it("unified without percent fields does not synthesize false On-demand 0%", () => {
+    const parsed = parseGrokCliBilling(
+      UNIFIED_NO_PERCENT_BILLING,
+      { ...USER_PROFILE, hasGrokCodeAccess: true },
+      PLAIN_MONTHLY_BILLING,
+    );
+    expect(parsed.quotas["On-demand"]).toBeUndefined();
+    expect(parsed.quotas.Monthly).toMatchObject({
+      used: 6689,
+      total: 20000,
+    });
+    expect(parsed.exhausted).toBe(false);
   });
 
   it("uses subscriptionTier for plan when present", () => {

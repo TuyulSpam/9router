@@ -26,6 +26,7 @@
  * Plain /v1/billing adds monthlyLimit + used for absolute monthly bars.
  */
 
+import { gunzipSync } from "zlib";
 import { proxyAwareFetch } from "../../utils/proxyFetch.js";
 import { U, parseResetTime, toFiniteNumber } from "./shared.js";
 
@@ -37,6 +38,34 @@ const PLAIN_BILLING_URL =
   (typeof BILLING_URL === "string" && BILLING_URL.includes("?"))
     ? BILLING_URL.replace(/\?.*$/, "")
     : "https://cli-chat-proxy.grok.com/v1/billing";
+
+/**
+ * Read response body as JSON.
+ * undici ProxyAgent sometimes returns gzip bytes without decompressing
+ * (Content-Type missing, body starts with 1f 8b) — gunzip those.
+ */
+async function readResponseJson(res) {
+  if (!res) return null;
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (!buf.length) return null;
+  let text;
+  try {
+    if (buf[0] === 0x1f && buf[1] === 0x8b) {
+      text = gunzipSync(buf).toString("utf8");
+    } else {
+      text = buf.toString("utf8");
+    }
+  } catch {
+    return null;
+  }
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+}
 
 /** Unwrap protobuf-json `{ val: n }` or plain numbers/strings. */
 function unwrapVal(value, fallback = 0) {
@@ -65,6 +94,9 @@ function buildGrokCliHeaders(accessToken, providerSpecificData = {}) {
   const headers = {
     Authorization: `Bearer ${accessToken}`,
     Accept: "application/json",
+    // Avoid compressed bodies: undici ProxyAgent path often fails to decompress gzip,
+    // which surfaces as "billing response was not JSON" in the quota tracker.
+    "Accept-Encoding": "identity",
     "User-Agent": "grok-pager/0.2.93 grok-shell/0.2.93 (linux; x86_64)",
     "x-xai-token-auth": "xai-grok-cli",
     "x-grok-client-identifier": "grok-pager",
@@ -183,6 +215,8 @@ export function parseGrokCliBilling(billing, user = null, plainBilling = null) {
   }
 
   // ── 2. Absolute on-demand window (promo / older account types) ───────────
+  const isUnifiedBillingUser =
+    config.isUnifiedBillingUser === true || root.isUnifiedBillingUser === true;
   const onDemandCap = unwrapVal(config.onDemandCap ?? root.onDemandCap, NaN);
   const onDemandUsed = unwrapVal(config.onDemandUsed ?? root.onDemandUsed, NaN);
   if (Number.isFinite(onDemandCap) && onDemandCap > 0) {
@@ -194,8 +228,10 @@ export function parseGrokCliBilling(billing, user = null, plainBilling = null) {
     });
   } else if (
     // Only synthesize depleted On-demand when we have nothing better to show.
-    // Unified accounts keep onDemandCap=0 even with remaining weekly credits.
+    // Unified accounts keep onDemandCap=0 even with remaining weekly/monthly credits
+    // (percent fields or plain /v1/billing monthly) — never treat that as free-promo exhausted.
     !hasPercentQuota &&
+    !isUnifiedBillingUser &&
     Number.isFinite(onDemandCap) &&
     onDemandCap === 0 &&
     Number.isFinite(onDemandUsed)
@@ -336,19 +372,22 @@ export async function getGrokCliUsage(accessToken, providerSpecificData = null, 
       return { message: `Grok CLI billing API error (${billingRes.status})${trimmed}` };
     }
 
-    const billing = await billingRes.json().catch(() => null);
+    const billing = await readResponseJson(billingRes);
     if (!billing || typeof billing !== "object") {
-      return { message: "Grok CLI billing response was not JSON." };
+      return {
+        message:
+          "Grok CLI billing response was not JSON. If this connection uses a proxy, try disabling the connection proxy (gzip via some HTTP proxies is not decoded).",
+      };
     }
 
     let plainBilling = null;
     if (plainRes?.ok) {
-      plainBilling = await plainRes.json().catch(() => null);
+      plainBilling = await readResponseJson(plainRes);
     }
 
     let user = null;
     if (userRes?.ok) {
-      user = await userRes.json().catch(() => null);
+      user = await readResponseJson(userRes);
     }
 
     const parsed = parseGrokCliBilling(billing, user, plainBilling);
