@@ -1,0 +1,16 @@
+9ROUTER OPS POLICY (this machine)
+=================================
+PIN: see ~/.9router/KNOWN_GOOD_COMMIT and ~/openclaw-backups/9router-known-good-latest
+
+DO:
+  - Deploy only via scripts/deploy-live.sh from /home/ubuntu/9router
+  - Backup outside node_modules before every deploy
+  - Merge upstream PRs selectively; test; then deploy --pin
+
+DO NOT:
+  - npm install -g 9router@latest / npm update -g 9router
+  - Large rewrites (global proxy redesign, multi-region, open-sse re-architecture)
+    unless there is a concrete production failure and a scoped plan
+  - Force-push or hard-reset published history without a new pin
+
+Rationale: stack (v0.5.30 + local PR ports) is production-stable; change surface should stay small.
