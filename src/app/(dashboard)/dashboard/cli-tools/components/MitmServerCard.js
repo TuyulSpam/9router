@@ -37,9 +37,22 @@ export default function MitmServerCard({ apiKeys, cloudEnabled, onStatusChange }
           setMitmRouterBaseUrl(data.mitmRouterBaseUrl);
         }
         onStatusChange?.(data);
+        setActionError(null);
+      } else {
+        let msg = `MITM status failed (HTTP ${res.status})`;
+        try {
+          const data = await res.json();
+          if (data?.error) msg = data.error;
+        } catch { /* ignore */ }
+        if (res.status === 403) {
+          msg = `${msg} — open the dashboard while logged in (or use localhost). MITM APIs are restricted.`;
+        }
+        setActionError(msg);
+        setStatus({ running: false, certExists: false, dnsStatus: {} });
       }
     } catch {
       setStatus({ running: false, certExists: false, dnsStatus: {} });
+      setActionError("Network error loading MITM status");
     }
   }, [onStatusChange]);
 

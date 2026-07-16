@@ -141,7 +141,12 @@ async function canAccessPublicLlmApi(request) {
 
 async function canAccessLocalOnlyRoute(request) {
   if (await hasValidCliToken(request)) return true;
-  // Browser on host: loopback Host + Origin (blocks tunnel/CSRF) + auth (JWT or requireLogin=false)
+  // Dashboard admin JWT (logged-in session). Required for MITM UI when the dashboard
+  // is opened via LAN IP / tunnel Host (isLocalRequest is false on non-loopback sockets).
+  // JWT proves an interactive login — do not use isAuthenticated() here (that also
+  // allows requireLogin=false and would open spawn routes to the network unauthenticated).
+  if (await hasValidToken(request)) return true;
+  // requireLogin=false: only true loopback (no WAN open for sudo/DNS/MITM)
   if (isLocalRequest(request) && await isAuthenticated(request)) return true;
   return false;
 }

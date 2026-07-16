@@ -63,7 +63,14 @@ export default function MitmToolCard({
     } catch { /* ignore */ }
   }, [tool.id]);
 
-  const getMappingEntry = (alias) => modelMappings[alias] || {};
+  // Support legacy string maps and structured { model, reasoningEffort } entries.
+  const getMappingEntry = (alias) => {
+    const raw = modelMappings[alias];
+    if (!raw) return {};
+    if (typeof raw === "string") return { model: raw };
+    if (typeof raw === "object" && !Array.isArray(raw)) return raw;
+    return {};
+  };
 
   const updateMapping = (alias, patch, shouldSave = false) => {
     const updatedEntry = { ...getMappingEntry(alias), ...patch };
