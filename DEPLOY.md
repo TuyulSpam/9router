@@ -6,11 +6,12 @@ Dokumen operasional untuk mesin ini (`/home/ubuntu/9router` → PM2 `9router` di
 
 | Field | Value |
 |---|---|
-| **Commit** | `da8ef60` (`da8ef60c09cc23e56f26eeac5efabee4f61d9e76`) |
+| **Live app binary** | `da8ef60` (feature stack; see `.openclaw-source-commit`) |
+| **Ops/docs tip** | `f022094` (DEPLOY.md + `ops/*` scripts) |
 | **Version** | `0.5.30` |
-| **Pin dir** | `~/openclaw-backups/9router-known-good-da8ef60` |
-| **Latest symlink** | `~/openclaw-backups/9router-known-good-latest` |
-| **Pointer** | `~/.9router/KNOWN_GOOD_COMMIT` / `KNOWN_GOOD_PATH` |
+| **Pin dir (latest)** | `~/openclaw-backups/9router-known-good-latest` → `9router-known-good-f022094` |
+| **Binary-only pin** | `~/openclaw-backups/9router-known-good-da8ef60` |
+| **Pointer** | `~/.9router/KNOWN_GOOD_COMMIT` / `KNOWN_GOOD_PATH` / `KNOWN_GOOD_SHORT` |
 
 Stack yang termasuk pin ini:
 
