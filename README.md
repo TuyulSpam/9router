@@ -237,6 +237,10 @@ Default URLs:
         <b>Codex</b>
       </td>
       <td align="center" width="120">
+        <img src="./public/providers/grok-cli.png" width="60" alt="Grok Build"/><br/>
+        <b>Grok Build</b>
+      </td>
+      <td align="center" width="120">
         <img src="./public/providers/opencode.png" width="60" alt="OpenCode"/><br/>
         <b>OpenCode</b>
       </td>
@@ -1071,6 +1075,41 @@ export OPENAI_API_KEY="your-9router-api-key"
 
 codex "your prompt"
 ```
+
+### Grok Build
+
+Grok Build is a first-class 9Router CLI tool. It writes `[model.9router]` into `~/.grok/config.toml`, sets it as the default model slot, and runs a live chat/tools smoke probe.
+
+**Option 1 — Terminal (recommended):**
+
+```
+9router → CLI Tools → Grok Build
+  1) Status
+  2) Quick Setup (one click)
+  3) Custom setup
+  4) Test health (config unchanged)
+  5) Reset
+```
+
+Quick Setup uses the current gateway endpoint, the first dashboard API key, and the suggested/configured model (prefer LLM combos such as `Kelas-berat`, then `gcli/*`).
+
+**Option 2 — Dashboard:**
+
+```
+Dashboard → CLI Tools → Grok Build → Quick Setup
+```
+
+Or use Apply / Test / Reset for custom endpoint, key, and model.
+
+**After setup:**
+
+```bash
+grok
+# or inside Grok Build: /model 9router
+# switch back to built-in: /model grok-build
+```
+
+Prefer `gcli/*` (Grok CLI OAuth) or combos that include `gcli` members. Direct `xai/grok-4.5-high` often fails with model-not-found.
 
 ### OpenClaw
 

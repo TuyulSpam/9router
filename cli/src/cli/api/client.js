@@ -363,7 +363,7 @@ async function deleteCombo(id) {
 
 /**
  * Get CLI tool settings
- * @param {string} tool - Tool name: claude | codex | droid | openclaw
+ * @param {string} tool - Tool name: claude | codex | grok-build | droid | openclaw | opencode | hermes
  * @returns {Promise<Object>} { success, data: { installed, has9Router, ... } }
  */
 async function getCliToolSettings(tool) {
@@ -372,7 +372,7 @@ async function getCliToolSettings(tool) {
 
 /**
  * Apply CLI tool settings (POST)
- * @param {string} tool - Tool name: claude | codex | droid | openclaw
+ * @param {string} tool - Tool name: claude | codex | grok-build | droid | openclaw | opencode | hermes
  * @param {Object} body - Payload depends on tool
  * @returns {Promise<Object>} { success, data }
  */
@@ -382,7 +382,7 @@ async function applyCliToolSettings(tool, body) {
 
 /**
  * Reset CLI tool settings (DELETE)
- * @param {string} tool - Tool name: claude | codex | droid | openclaw
+ * @param {string} tool - Tool name: claude | codex | grok-build | droid | openclaw | opencode | hermes
  * @returns {Promise<Object>} { success, data }
  */
 async function resetCliToolSettings(tool) {

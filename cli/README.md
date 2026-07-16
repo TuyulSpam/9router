@@ -92,9 +92,26 @@ That's it! Start coding with FREE AI models.
 
 ## 🛠️ Supported CLI Tools
 
-Claude-Code • OpenClaw • Codex • OpenCode • Cursor • Antigravity • Cline • Continue • Droid • Roo • Copilot • Kilo Code • Gemini CLI • Qwen Code • iFlow • Crush • Crusher • Aider
+Claude-Code • Grok Build • OpenClaw • Codex • OpenCode • Cursor • Antigravity • Cline • Continue • Droid • Roo • Copilot • Kilo Code • Gemini CLI • Qwen Code • iFlow • Crush • Crusher • Aider
 
 Any tool supporting OpenAI/Claude-compatible API works.
+
+### Grok Build (first-class)
+
+From the terminal menu:
+
+```
+9router → CLI Tools → Grok Build
+  1) Status            # installed / configured / model / endpoint / health
+  2) Quick Setup       # endpoint + first API key + suggested model + smoke
+  3) Custom setup      # pick endpoint / key / model
+  4) Test health       # probeOnly smoke test, config unchanged
+  5) Reset             # remove [model.9router] and restore previous default
+```
+
+Or from the dashboard: **CLI Tools → Grok Build → Quick Setup**.
+
+Prefer models/combos under `gcli/*`. After Apply, run `grok` (or `/model 9router`).
 
 ---
 

@@ -4,6 +4,7 @@ const { showStatus } = require("../utils/display");
 const { selectModelFromList } = require("../utils/modelSelector");
 const { showMenuWithBack } = require("../utils/menuHelper");
 const { getEndpoint } = require("../utils/endpoint");
+const { showGrokBuildMenu } = require("./grokBuildMenu");
 
 const COLORS = {
   reset: "\x1b[0m",
@@ -594,6 +595,10 @@ async function showCliToolsMenu(port, breadcrumb = []) {
       {
         label: "Codex CLI",
         action: async () => { await showCodexMenu(port, [...breadcrumb, "Codex CLI"]); return true; }
+      },
+      {
+        label: "Grok Build",
+        action: async () => { await showGrokBuildMenu(port, [...breadcrumb, "Grok Build"]); return true; }
       },
       {
         label: "Factory Droid",

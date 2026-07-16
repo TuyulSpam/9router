@@ -1,14 +1,51 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { Card, Button, ModelSelectModal, ManualConfigModal } from "@/shared/components";
 import Image from "next/image";
 import BaseUrlSelect from "./BaseUrlSelect";
 import ApiKeySelect from "./ApiKeySelect";
 import { matchKnownEndpoint } from "./cliEndpointMatch";
+import {
+  buildGrokBuildManualConfig,
+  prepareGrokBuildQuickSetup,
+} from "@/lib/cli-tools/grokBuildSetup";
 
 const ENDPOINT = "/api/cli-tools/grok-build-settings";
-const MODEL_SLOT = "9router";
+
+// Client-side mirror of risky xai path (server also validates)
+const RISKY_XAI_RE = /^(?:xai|x-ai)\/grok-4\.5(?:-|$)/i;
+
+function collectLiveWarnings(model, status, health) {
+  const out = [];
+  if (!model) return out;
+
+  if (RISKY_XAI_RE.test(model)) {
+    out.push(
+      "Direct xAI path often fails for grok-4.5-high. Prefer gcli/grok-4.5-high (Grok CLI OAuth) or a combo that uses gcli."
+    );
+  }
+
+  const serverWarnings = status?.validation?.warnings || status?.pathAnalysis?.warnings || [];
+  for (const w of serverWarnings) {
+    if (w && !out.includes(w)) out.push(w);
+  }
+
+  if (health?.status === "unhealthy" && health?.error) {
+    out.push(`Last smoke test failed: ${health.error}`);
+  }
+
+  return out;
+}
+
+function pickDefaultModel(status, availableModels = []) {
+  return (
+    status?.settings?.model?.model
+    || status?.suggestedModel
+    || availableModels?.[0]?.value
+    || ""
+  );
+}
 
 export default function GrokBuildToolCard({
   tool,
@@ -18,6 +55,7 @@ export default function GrokBuildToolCard({
   hasActiveProviders,
   apiKeys,
   activeProviders,
+  availableModels = [],
   cloudEnabled,
   initialStatus,
   tunnelEnabled,
@@ -28,15 +66,32 @@ export default function GrokBuildToolCard({
   const [grokStatus, setGrokStatus] = useState(initialStatus || null);
   const [checking, setChecking] = useState(false);
   const [applying, setApplying] = useState(false);
+  const [quickSetting, setQuickSetting] = useState(false);
   const [restoring, setRestoring] = useState(false);
+  const [testing, setTesting] = useState(false);
   const [message, setMessage] = useState(null);
-  const [selectedApiKey, setSelectedApiKey] = useState("");
-  const [selectedModel, setSelectedModel] = useState("");
+  const [health, setHealth] = useState(null);
+  const [selectedApiKey, setSelectedApiKey] = useState(() => apiKeys?.[0]?.key || "");
+  const [selectedModel, setSelectedModel] = useState(() => pickDefaultModel(initialStatus, availableModels));
   const [modalOpen, setModalOpen] = useState(false);
   const [modelAliases, setModelAliases] = useState({});
   const [showManualConfigModal, setShowManualConfigModal] = useState(false);
   const [customBaseUrl, setCustomBaseUrl] = useState("");
-  const hasInitializedModel = useRef(false);
+  const hasInitializedModel = useRef(!!pickDefaultModel(initialStatus, availableModels));
+
+  // Keep selected key in sync when keys load later (user hasn't chosen yet)
+  const effectiveApiKey = selectedApiKey || apiKeys?.[0]?.key || "";
+
+  const applyStatusAndMaybePrefill = useCallback((data) => {
+    setGrokStatus(data);
+    if (!hasInitializedModel.current && data?.installed) {
+      const suggested = pickDefaultModel(data, availableModels);
+      if (suggested) {
+        hasInitializedModel.current = true;
+        setSelectedModel(suggested);
+      }
+    }
+  }, [availableModels]);
 
   const getConfigStatus = () => {
     if (!grokStatus?.installed) return null;
@@ -48,25 +103,12 @@ export default function GrokBuildToolCard({
 
   const configStatus = getConfigStatus();
 
-  useEffect(() => {
-    if (apiKeys?.length > 0 && !selectedApiKey) {
-      setSelectedApiKey(apiKeys[0].key);
-    }
-  }, [apiKeys, selectedApiKey]);
+  const liveWarnings = useMemo(
+    () => collectLiveWarnings(selectedModel, grokStatus, health),
+    [selectedModel, grokStatus, health]
+  );
 
-  useEffect(() => {
-    if (initialStatus) setGrokStatus(initialStatus);
-  }, [initialStatus]);
-
-  useEffect(() => {
-    if (isExpanded && !grokStatus) {
-      checkStatus();
-      fetchModelAliases();
-    }
-    if (isExpanded) fetchModelAliases();
-  }, [isExpanded]);
-
-  const fetchModelAliases = async () => {
+  const fetchModelAliases = useCallback(async () => {
     try {
       const res = await fetch("/api/models/alias");
       const data = await res.json();
@@ -74,28 +116,43 @@ export default function GrokBuildToolCard({
     } catch (error) {
       console.log("Error fetching model aliases:", error);
     }
-  };
+  }, []);
 
-  useEffect(() => {
-    if (grokStatus?.installed && !hasInitializedModel.current) {
-      hasInitializedModel.current = true;
-      const cfg = grokStatus.settings?.model;
-      if (cfg?.model) setSelectedModel(cfg.model);
-    }
-  }, [grokStatus]);
-
-  const checkStatus = async () => {
+  const checkStatus = useCallback(async () => {
     setChecking(true);
     try {
       const res = await fetch(ENDPOINT);
       const data = await res.json();
-      setGrokStatus(data);
+      applyStatusAndMaybePrefill(data);
     } catch (error) {
       setGrokStatus({ installed: false, error: error.message });
     } finally {
       setChecking(false);
     }
-  };
+  }, [applyStatusAndMaybePrefill]);
+
+  useEffect(() => {
+    if (!isExpanded) return;
+    let cancelled = false;
+    (async () => {
+      if (!grokStatus) {
+        setChecking(true);
+        try {
+          const res = await fetch(ENDPOINT);
+          const data = await res.json();
+          if (!cancelled) applyStatusAndMaybePrefill(data);
+        } catch (error) {
+          if (!cancelled) setGrokStatus({ installed: false, error: error.message });
+        } finally {
+          if (!cancelled) setChecking(false);
+        }
+      }
+      if (!cancelled) fetchModelAliases();
+    })();
+    return () => { cancelled = true; };
+    // Only re-run when expand toggles; status refresh is explicit via buttons
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isExpanded]);
 
   const normalizeLocalhost = (url) => url.replace("://localhost", "://127.0.0.1");
 
@@ -107,34 +164,64 @@ export default function GrokBuildToolCard({
   };
 
   const getEffectiveBaseUrl = () => {
-    const url = customBaseUrl || getLocalBaseUrl();
+    const url = customBaseUrl || baseUrl || getLocalBaseUrl();
     return url.endsWith("/v1") ? url : `${url}/v1`;
   };
 
+  const resolveApiKey = () =>
+    effectiveApiKey?.trim()
+    || (!cloudEnabled ? "sk_9router" : null);
+
+  const applyPayload = (overrides = {}) => ({
+    baseUrl: getEffectiveBaseUrl(),
+    apiKey: resolveApiKey(),
+    model: selectedModel,
+    smoke: true,
+    ...overrides,
+  });
+
+  const applySettings = async (payload, { source = "apply" } = {}) => {
+    const res = await fetch(ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      if (data.health) setHealth(data.health);
+      if (payload.model) {
+        hasInitializedModel.current = true;
+        setSelectedModel(payload.model);
+      }
+      const warnCount = data.validation?.warnings?.length || 0;
+      const healthOk = data.health?.status === "healthy";
+      setMessage({
+        type: healthOk ? "success" : "warning",
+        text: data.message
+          || (healthOk
+            ? (source === "quick"
+              ? "Quick Setup complete — smoke test healthy"
+              : "Settings applied — smoke test healthy")
+            : (source === "quick"
+              ? "Quick Setup applied, but smoke test failed"
+              : "Settings applied, but smoke test failed")),
+        details: warnCount > 0 ? data.validation.warnings : null,
+      });
+      checkStatus();
+    } else {
+      setMessage({ type: "error", text: data.error || "Failed to apply settings" });
+    }
+  };
+
   const handleApply = async () => {
+    if (!selectedModel?.trim()) {
+      setMessage({ type: "error", text: "Select a model first" });
+      return;
+    }
     setApplying(true);
     setMessage(null);
     try {
-      const keyToUse = selectedApiKey?.trim()
-        || (apiKeys?.length > 0 ? apiKeys[0].key : null)
-        || (!cloudEnabled ? "sk_9router" : null);
-
-      const res = await fetch(ENDPOINT, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          baseUrl: getEffectiveBaseUrl(),
-          apiKey: keyToUse,
-          model: selectedModel,
-        }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setMessage({ type: "success", text: "Settings applied successfully!" });
-        checkStatus();
-      } else {
-        setMessage({ type: "error", text: data.error || "Failed to apply settings" });
-      }
+      await applySettings(applyPayload(), { source: "apply" });
     } catch (error) {
       setMessage({ type: "error", text: error.message });
     } finally {
@@ -142,14 +229,76 @@ export default function GrokBuildToolCard({
     }
   };
 
+  const handleQuickSetup = async () => {
+    // True one-click: ignore manual Apply selections; use smart model + first API key.
+    const prepared = prepareGrokBuildQuickSetup({
+      status: grokStatus,
+      baseUrl: getEffectiveBaseUrl(),
+      apiKeys,
+      cloudEnabled,
+    });
+    if (!prepared.ok) {
+      setMessage({ type: "error", text: prepared.error });
+      return;
+    }
+
+    setQuickSetting(true);
+    setMessage(null);
+    try {
+      if (prepared.payload.apiKey) setSelectedApiKey(prepared.payload.apiKey);
+      await applySettings(prepared.payload, { source: "quick" });
+    } catch (error) {
+      setMessage({ type: "error", text: error.message });
+    } finally {
+      setQuickSetting(false);
+    }
+  };
+
+  const handleTest = async () => {
+    if (!selectedModel?.trim()) {
+      setMessage({ type: "error", text: "Select a model first" });
+      return;
+    }
+    setTesting(true);
+    setMessage(null);
+    try {
+      const res = await fetch(ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(applyPayload({ probeOnly: true, probeTools: true })),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        if (data.health) setHealth(data.health);
+        const healthOk = data.health?.status === "healthy";
+        const warns = data.validation?.warnings || [];
+        setMessage({
+          type: healthOk ? "success" : "warning",
+          text: healthOk
+            ? `Smoke test healthy (${data.health?.latencyMs ?? "?"}ms) — config unchanged`
+            : `Smoke test failed: ${data.health?.error || "unknown error"}`,
+          details: warns.length ? warns : null,
+        });
+      } else {
+        setMessage({ type: "error", text: data.error || "Test failed" });
+      }
+    } catch (error) {
+      setMessage({ type: "error", text: error.message });
+    } finally {
+      setTesting(false);
+    }
+  };
+
   const handleReset = async () => {
     setRestoring(true);
     setMessage(null);
+    setHealth(null);
     try {
       const res = await fetch(ENDPOINT, { method: "DELETE" });
       const data = await res.json();
       if (res.ok) {
-        setMessage({ type: "success", text: "Settings reset successfully!" });
+        setMessage({ type: "success", text: data.message || "Settings reset successfully!" });
+        hasInitializedModel.current = false;
         setSelectedModel("");
         checkStatus();
       } else {
@@ -163,31 +312,45 @@ export default function GrokBuildToolCard({
   };
 
   const handleModelSelect = (model) => {
-    setSelectedModel(model.value);
+    hasInitializedModel.current = true;
+    setSelectedModel(model.value || model.name || model);
     setModalOpen(false);
   };
 
   const getManualConfigs = () => {
-    const keyToUse = (selectedApiKey && selectedApiKey.trim())
-      ? selectedApiKey
-      : (!cloudEnabled ? "sk_9router" : "<API_KEY_FROM_DASHBOARD>");
-
-    const modelId = selectedModel || "provider/model-id";
-    const tomlContent = `[models]
-default = "${MODEL_SLOT}"
-
-[model.${MODEL_SLOT}]
-model = "${modelId}"
-base_url = "${getEffectiveBaseUrl()}"
-name = "9Router"
-description = "Routed via 9Router gateway"
-api_backend = "chat_completions"
-api_key = "${keyToUse}"
-`;
-
+    // Never embed a live dashboard/API key into copyable UI content.
+    const modelId = selectedModel || grokStatus?.suggestedModel || "provider/model-id";
     return [
-      { filename: "~/.grok/config.toml", content: tomlContent },
+      {
+        filename: "~/.grok/config.toml",
+        content: buildGrokBuildManualConfig({
+          model: modelId,
+          baseUrl: getEffectiveBaseUrl(),
+        }),
+      },
     ];
+  };
+
+  const healthBadge = () => {
+    if (!health) return null;
+    if (health.status === "healthy") {
+      return (
+        <span className="px-1.5 py-0.5 text-[10px] font-medium bg-green-500/10 text-green-600 dark:text-green-400 rounded-full">
+          Healthy{health.latencyMs != null ? ` · ${health.latencyMs}ms` : ""}
+        </span>
+      );
+    }
+    return (
+      <span className="px-1.5 py-0.5 text-[10px] font-medium bg-red-500/10 text-red-600 dark:text-red-400 rounded-full">
+        Unhealthy
+      </span>
+    );
+  };
+
+  const messageCls = {
+    success: "bg-green-500/10 text-green-600",
+    warning: "bg-yellow-500/10 text-yellow-700 dark:text-yellow-300",
+    error: "bg-red-500/10 text-red-600",
   };
 
   return (
@@ -211,6 +374,7 @@ api_key = "${keyToUse}"
               {configStatus === "configured" && <span className="px-1.5 py-0.5 text-[10px] font-medium bg-green-500/10 text-green-600 dark:text-green-400 rounded-full">Connected</span>}
               {configStatus === "not_configured" && <span className="px-1.5 py-0.5 text-[10px] font-medium bg-yellow-500/10 text-yellow-600 dark:text-yellow-400 rounded-full">Not configured</span>}
               {configStatus === "other" && <span className="px-1.5 py-0.5 text-[10px] font-medium bg-blue-500/10 text-blue-600 dark:text-blue-400 rounded-full">Other</span>}
+              {healthBadge()}
             </div>
             <p className="text-xs text-text-muted truncate">{tool.description}</p>
           </div>
@@ -277,6 +441,27 @@ api_key = "${keyToUse}"
                   </div>
                 )}
 
+                {(grokStatus?.settings?.model?.base_url || health) && (
+                  <div className="grid grid-cols-1 gap-1.5 rounded border border-border/60 bg-surface/30 p-2 text-xs text-text-muted">
+                    <div className="flex flex-wrap gap-x-3 gap-y-1">
+                      <span>
+                        <span className="font-semibold text-text-main">Endpoint:</span>{" "}
+                        {grokStatus?.settings?.model?.base_url || getEffectiveBaseUrl()}
+                      </span>
+                      <span>
+                        <span className="font-semibold text-text-main">Model:</span>{" "}
+                        {grokStatus?.settings?.model?.model || selectedModel || "—"}
+                      </span>
+                      <span>
+                        <span className="font-semibold text-text-main">Health:</span>{" "}
+                        {health
+                          ? `${health.status}${health.latencyMs != null ? ` (${health.latencyMs}ms)` : ""}`
+                          : "not tested"}
+                      </span>
+                    </div>
+                  </div>
+                )}
+
                 <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-[8rem_auto_1fr] sm:items-center sm:gap-2">
                   <span className="text-xs font-semibold text-text-main sm:text-right sm:text-sm">Select Endpoint</span>
                   <span className="material-symbols-outlined hidden text-text-muted text-[14px] sm:inline">arrow_forward</span>
@@ -305,7 +490,14 @@ api_key = "${keyToUse}"
                 <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-[8rem_auto_1fr_auto] sm:items-center sm:gap-2">
                   <span className="text-xs font-semibold text-text-main sm:text-right sm:text-sm">API Key</span>
                   <span className="material-symbols-outlined hidden text-text-muted text-[14px] sm:inline">arrow_forward</span>
-                  <ApiKeySelect value={selectedApiKey} onChange={setSelectedApiKey} apiKeys={apiKeys} cloudEnabled={cloudEnabled} />
+                  <ApiKeySelect
+                    value={effectiveApiKey}
+                    onChange={(v) => {
+                      setSelectedApiKey(v);
+                    }}
+                    apiKeys={apiKeys}
+                    cloudEnabled={cloudEnabled}
+                  />
                 </div>
 
                 <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-[8rem_auto_1fr_auto] sm:items-center sm:gap-2">
@@ -315,13 +507,19 @@ api_key = "${keyToUse}"
                     <input
                       type="text"
                       value={selectedModel}
-                      onChange={(e) => setSelectedModel(e.target.value)}
-                      placeholder="provider/model-id"
+                      onChange={(e) => {
+                        hasInitializedModel.current = true;
+                        setSelectedModel(e.target.value);
+                      }}
+                      placeholder={grokStatus?.suggestedModel || "combo or provider/model-id"}
                       className="w-full min-w-0 pl-2 pr-7 py-2 bg-surface rounded border border-border text-xs focus:outline-none focus:ring-1 focus:ring-primary/50 sm:py-1.5"
                     />
                     {selectedModel && (
                       <button
-                        onClick={() => setSelectedModel("")}
+                        onClick={() => {
+                          hasInitializedModel.current = true;
+                          setSelectedModel("");
+                        }}
                         className="absolute right-1 top-1/2 -translate-y-1/2 p-0.5 text-text-muted hover:text-red-500 rounded transition-colors"
                         title="Clear"
                       >
@@ -341,20 +539,75 @@ api_key = "${keyToUse}"
                     Select
                   </button>
                 </div>
+
+                {grokStatus?.suggestedModel && selectedModel !== grokStatus.suggestedModel && (
+                  <div className="flex items-center gap-2 text-xs text-text-muted pl-0 sm:pl-[calc(8rem+0.5rem+14px+0.5rem)]">
+                    <span>Suggested:</span>
+                    <button
+                      type="button"
+                      className="text-primary hover:underline font-medium"
+                      onClick={() => {
+                        hasInitializedModel.current = true;
+                        setSelectedModel(grokStatus.suggestedModel);
+                      }}
+                    >
+                      {grokStatus.suggestedModel}
+                    </button>
+                  </div>
+                )}
+
+                {liveWarnings.length > 0 && (
+                  <div className="flex flex-col gap-1.5">
+                    {liveWarnings.map((w, i) => (
+                      <div
+                        key={i}
+                        className="flex items-start gap-2 p-2 rounded text-xs bg-yellow-500/10 text-yellow-700 dark:text-yellow-300"
+                      >
+                        <span className="material-symbols-outlined text-[14px] mt-0.5">warning</span>
+                        <span>{w}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               {message && (
-                <div className={`flex items-center gap-2 px-2 py-1.5 rounded text-xs ${message.type === "success" ? "bg-green-500/10 text-green-600" : "bg-red-500/10 text-red-600"}`}>
-                  <span className="material-symbols-outlined text-[14px]">{message.type === "success" ? "check_circle" : "error"}</span>
-                  <span>{message.text}</span>
+                <div className={`flex flex-col gap-1 px-2 py-1.5 rounded text-xs ${messageCls[message.type] || messageCls.error}`}>
+                  <div className="flex items-center gap-2">
+                    <span className="material-symbols-outlined text-[14px]">
+                      {message.type === "success" ? "check_circle" : message.type === "warning" ? "warning" : "error"}
+                    </span>
+                    <span>{message.text}</span>
+                  </div>
+                  {message.details?.length > 0 && (
+                    <ul className="list-disc pl-6 opacity-90">
+                      {message.details.map((d, i) => (
+                        <li key={i}>{d}</li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
               )}
 
               <div className="flex flex-col sm:flex-row sm:items-center gap-2">
-                <Button variant="primary" size="sm" onClick={handleApply} disabled={!selectedModel} loading={applying} className="w-full sm:w-auto">
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={handleQuickSetup}
+                  disabled={!grokStatus?.installed || applying || testing || restoring}
+                  loading={quickSetting}
+                  className="w-full sm:w-auto"
+                  title="One click: endpoint + first API key + configured/suggested model + smoke test"
+                >
+                  <span className="material-symbols-outlined text-[14px] mr-1">bolt</span>Quick Setup
+                </Button>
+                <Button variant="secondary" size="sm" onClick={handleApply} disabled={!selectedModel || quickSetting} loading={applying} className="w-full sm:w-auto">
                   <span className="material-symbols-outlined text-[14px] mr-1">save</span>Apply
                 </Button>
-                <Button variant="outline" size="sm" onClick={handleReset} disabled={!grokStatus?.has9Router} loading={restoring} className="w-full sm:w-auto">
+                <Button variant="secondary" size="sm" onClick={handleTest} disabled={!selectedModel || quickSetting} loading={testing} className="w-full sm:w-auto">
+                  <span className="material-symbols-outlined text-[14px] mr-1">science</span>Test
+                </Button>
+                <Button variant="outline" size="sm" onClick={handleReset} disabled={!grokStatus?.has9Router || quickSetting} loading={restoring} className="w-full sm:w-auto">
                   <span className="material-symbols-outlined text-[14px] mr-1">restore</span>Reset
                 </Button>
                 <Button variant="ghost" size="sm" onClick={() => setShowManualConfigModal(true)} className="w-full sm:w-auto">

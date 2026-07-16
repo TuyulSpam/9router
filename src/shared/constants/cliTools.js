@@ -376,7 +376,11 @@ amp --model "{{model}}"
       },
       {
         type: "info",
-        text: "After Apply, run grok (or /model 9router) to use the routed model. Switch back anytime with /model grok-build.",
+        text: "Prefer gcli/* (Grok CLI OAuth) or combos that include gcli members. Direct xai/grok-4.5-high often fails with model-not-found.",
+      },
+      {
+        type: "info",
+        text: "After Apply, run grok (or /model 9router). Switch back anytime with /model grok-build. Use Test for a live smoke probe.",
       },
       {
         type: "warning",
