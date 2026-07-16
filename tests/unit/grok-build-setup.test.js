@@ -15,6 +15,9 @@ import {
   buildGrokBuildManualConfig,
   resolveStoredApiKeyForEndpoint,
   smokeTestGrokBuild,
+  normalizeGrokBuildBaseUrl,
+  buildGrokBuildDashboardTestPayload,
+  buildGrokBuildDashboardApplyPayload,
   MODEL_SLOT,
   BUILTIN_DEFAULT,
 } from "../../src/lib/cli-tools/grokBuildSetup.js";
@@ -497,5 +500,144 @@ describe("smokeTestGrokBuild", () => {
     expect(result.ok).toBe(false);
     expect(result.chat).toBe("error");
     expect(result.error).toMatch(/Model not found|404/i);
+  });
+});
+
+
+describe("normalizeGrokBuildBaseUrl", () => {
+  it("trims, strips trailing slashes, and ensures a single /v1 suffix", () => {
+    expect(normalizeGrokBuildBaseUrl("https://router.example/v1/")).toBe("https://router.example/v1");
+    expect(normalizeGrokBuildBaseUrl("https://router.example")).toBe("https://router.example/v1");
+    expect(normalizeGrokBuildBaseUrl("http://127.0.0.1:20128/v1")).toBe("http://127.0.0.1:20128/v1");
+    expect(normalizeGrokBuildBaseUrl("  http://localhost:20128//  ")).toBe("http://localhost:20128/v1");
+    expect(normalizeGrokBuildBaseUrl("")).toBe("");
+  });
+});
+
+describe("buildGrokBuildDashboardTestPayload", () => {
+  it("probes the configured endpoint/model with an empty key for server-side reuse", () => {
+    expect(
+      buildGrokBuildDashboardTestPayload({
+        status: {
+          installed: true,
+          settings: {
+            model: {
+              model: "Kelas-berat",
+              base_url: "http://127.0.0.1:20128/v1/",
+              hasApiKey: true,
+            },
+          },
+        },
+        // Form state must be ignored — Test is for the configured installation.
+        selectedModel: "form/model",
+        selectedApiKey: "sk_form",
+        formBaseUrl: "https://form.example",
+      })
+    ).toEqual({
+      ok: true,
+      error: null,
+      payload: {
+        baseUrl: "http://127.0.0.1:20128/v1",
+        apiKey: "",
+        model: "Kelas-berat",
+        smoke: true,
+        probeOnly: true,
+        probeTools: true,
+      },
+    });
+  });
+
+  it("rejects Test when Grok Build is not configured", () => {
+    expect(
+      buildGrokBuildDashboardTestPayload({
+        status: { installed: true, settings: { model: null } },
+        selectedModel: "Kelas-berat",
+      })
+    ).toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/configure/i),
+      payload: null,
+    });
+  });
+});
+
+describe("buildGrokBuildDashboardApplyPayload", () => {
+  const configured = {
+    model: "Kelas-berat",
+    base_url: "http://127.0.0.1:20128/v1",
+    hasApiKey: true,
+  };
+
+  it("uses the selected API key when present", () => {
+    expect(
+      buildGrokBuildDashboardApplyPayload({
+        baseUrl: "http://127.0.0.1:20128",
+        model: "Kelas-berat",
+        selectedApiKey: "sk_selected",
+        configuredModel: configured,
+        cloudEnabled: true,
+      })
+    ).toEqual({
+      ok: true,
+      error: null,
+      payload: {
+        baseUrl: "http://127.0.0.1:20128/v1",
+        apiKey: "sk_selected",
+        model: "Kelas-berat",
+        smoke: true,
+      },
+    });
+  });
+
+  it("reuses the stored key with empty string on matching endpoint + hasApiKey", () => {
+    expect(
+      buildGrokBuildDashboardApplyPayload({
+        baseUrl: "http://127.0.0.1:20128/v1/",
+        model: "Kelas-berat",
+        selectedApiKey: "",
+        configuredModel: configured,
+        cloudEnabled: true,
+      })
+    ).toEqual({
+      ok: true,
+      error: null,
+      payload: {
+        baseUrl: "http://127.0.0.1:20128/v1",
+        apiKey: "",
+        model: "Kelas-berat",
+        smoke: true,
+      },
+    });
+  });
+
+  it("falls back to sk_9router for local/non-cloud when no key is available", () => {
+    expect(
+      buildGrokBuildDashboardApplyPayload({
+        baseUrl: "http://127.0.0.1:20128/v1",
+        model: "Kelas-berat",
+        selectedApiKey: "",
+        configuredModel: null,
+        cloudEnabled: false,
+      })
+    ).toMatchObject({
+      ok: true,
+      payload: { apiKey: "sk_9router" },
+    });
+  });
+
+  it("never sends null and aborts cloud Apply without a key or stored reuse", () => {
+    const result = buildGrokBuildDashboardApplyPayload({
+      baseUrl: "https://router.example/v1",
+      model: "Kelas-berat",
+      selectedApiKey: "",
+      configuredModel: configured, // different endpoint — no reuse
+      cloudEnabled: true,
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/API key/i),
+      payload: null,
+    });
+    expect(result).not.toHaveProperty("apiKey");
   });
 });

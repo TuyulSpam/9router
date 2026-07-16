@@ -9,6 +9,9 @@ import { matchKnownEndpoint } from "./cliEndpointMatch";
 import {
   buildGrokBuildManualConfig,
   prepareGrokBuildQuickSetup,
+  normalizeGrokBuildBaseUrl,
+  buildGrokBuildDashboardTestPayload,
+  buildGrokBuildDashboardApplyPayload,
 } from "@/lib/cli-tools/grokBuildSetup";
 
 const ENDPOINT = "/api/cli-tools/grok-build-settings";
@@ -165,20 +168,8 @@ export default function GrokBuildToolCard({
 
   const getEffectiveBaseUrl = () => {
     const url = customBaseUrl || baseUrl || getLocalBaseUrl();
-    return url.endsWith("/v1") ? url : `${url}/v1`;
+    return normalizeGrokBuildBaseUrl(url);
   };
-
-  const resolveApiKey = () =>
-    effectiveApiKey?.trim()
-    || (!cloudEnabled ? "sk_9router" : null);
-
-  const applyPayload = (overrides = {}) => ({
-    baseUrl: getEffectiveBaseUrl(),
-    apiKey: resolveApiKey(),
-    model: selectedModel,
-    smoke: true,
-    ...overrides,
-  });
 
   const applySettings = async (payload, { source = "apply" } = {}) => {
     const res = await fetch(ENDPOINT, {
@@ -214,14 +205,21 @@ export default function GrokBuildToolCard({
   };
 
   const handleApply = async () => {
-    if (!selectedModel?.trim()) {
-      setMessage({ type: "error", text: "Select a model first" });
+    const prepared = buildGrokBuildDashboardApplyPayload({
+      baseUrl: getEffectiveBaseUrl(),
+      model: selectedModel,
+      selectedApiKey: effectiveApiKey,
+      configuredModel: grokStatus?.settings?.model || null,
+      cloudEnabled,
+    });
+    if (!prepared.ok) {
+      setMessage({ type: "error", text: prepared.error });
       return;
     }
     setApplying(true);
     setMessage(null);
     try {
-      await applySettings(applyPayload(), { source: "apply" });
+      await applySettings(prepared.payload, { source: "apply" });
     } catch (error) {
       setMessage({ type: "error", text: error.message });
     } finally {
@@ -255,8 +253,9 @@ export default function GrokBuildToolCard({
   };
 
   const handleTest = async () => {
-    if (!selectedModel?.trim()) {
-      setMessage({ type: "error", text: "Select a model first" });
+    const prepared = buildGrokBuildDashboardTestPayload({ status: grokStatus });
+    if (!prepared.ok) {
+      setMessage({ type: "error", text: prepared.error });
       return;
     }
     setTesting(true);
@@ -265,7 +264,7 @@ export default function GrokBuildToolCard({
       const res = await fetch(ENDPOINT, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(applyPayload({ probeOnly: true, probeTools: true })),
+        body: JSON.stringify(prepared.payload),
       });
       const data = await res.json();
       if (res.ok) {

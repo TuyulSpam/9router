@@ -26,6 +26,7 @@ import {
   analyzeProviderPath,
   resolveStoredApiKeyForEndpoint,
   smokeTestGrokBuild,
+  normalizeGrokBuildBaseUrl,
 } from "@/lib/cli-tools/grokBuildSetup.js";
 
 /** Split "alias/model" for capability lookup; combos have no slash. */
@@ -99,7 +100,7 @@ async function loadCatalog({ baseUrl, apiKey } = {}) {
   // Optional live catalog when we have an endpoint (Apply smoke path)
   if (baseUrl) {
     try {
-      const root = baseUrl.endsWith("/v1") ? baseUrl : `${baseUrl.replace(/\/+$/, "")}/v1`;
+      const root = normalizeGrokBuildBaseUrl(baseUrl);
       const res = await fetch(`${root}/models`, {
         headers: {
           Authorization: `Bearer ${apiKey || "sk_9router"}`,
@@ -209,7 +210,7 @@ export async function POST(request) {
       return NextResponse.json({ error: "baseUrl and model are required" }, { status: 400 });
     }
 
-    const normalizedBaseUrl = baseUrl.endsWith("/v1") ? baseUrl : `${baseUrl.replace(/\/+$/, "")}/v1`;
+    const normalizedBaseUrl = normalizeGrokBuildBaseUrl(baseUrl);
     // Empty/missing client key may reuse a stored key only for the same endpoint.
     // This lets GET redact secrets without forwarding them to a different host.
     let keyToWrite = typeof apiKey === "string" && apiKey.trim() ? apiKey.trim() : "";

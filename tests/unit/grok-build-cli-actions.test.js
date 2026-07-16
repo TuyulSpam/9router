@@ -30,6 +30,10 @@ function baseDeps(apiOverrides = {}) {
         success: true,
         data: { keys: [{ key: "sk_first" }] },
       })),
+      getSettings: vi.fn(async () => ({
+        success: true,
+        data: { cloudEnabled: false },
+      })),
       applyCliToolSettings: vi.fn(async () => ({
         success: true,
         data: {
@@ -127,10 +131,29 @@ describe("grokBuildQuickSetup", () => {
     );
   });
 
-  it("does not Apply when no API key exists", async () => {
+  it("uses sk_9router for local Quick Setup when no API key exists", async () => {
     const { grokBuildQuickSetup } = loadMenu();
     const deps = baseDeps({
       getApiKeys: vi.fn(async () => ({ success: true, data: { keys: [] } })),
+      getSettings: vi.fn(async () => ({ success: true, data: { cloudEnabled: false } })),
+    });
+
+    await grokBuildQuickSetup(20128, deps);
+
+    expect(deps.api.applyCliToolSettings).toHaveBeenCalledWith("grok-build", {
+      baseUrl: "http://localhost:20128/v1",
+      apiKey: "sk_9router",
+      model: "Kelas-berat",
+      smoke: true,
+      probeTools: true,
+    });
+  });
+
+  it("does not Apply when cloud mode is enabled and no API key exists", async () => {
+    const { grokBuildQuickSetup } = loadMenu();
+    const deps = baseDeps({
+      getApiKeys: vi.fn(async () => ({ success: true, data: { keys: [] } })),
+      getSettings: vi.fn(async () => ({ success: true, data: { cloudEnabled: true } })),
     });
 
     await grokBuildQuickSetup(20128, deps);

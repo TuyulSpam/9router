@@ -340,11 +340,19 @@ export function validateGrokBuildModel(
   };
 }
 
-function normalizeBaseUrl(baseUrl) {
+/**
+ * Canonical Grok Build / OpenAI-compatible base URL:
+ * trim, strip trailing slashes, ensure exactly one trailing /v1.
+ */
+export function normalizeGrokBuildBaseUrl(baseUrl) {
   if (!baseUrl) return "";
   const trimmed = String(baseUrl).trim().replace(/\/+$/, "");
+  if (!trimmed) return "";
   return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
 }
+
+// Back-compat alias for internal callers in this module.
+const normalizeBaseUrl = normalizeGrokBuildBaseUrl;
 
 /**
  * Reuse a stored key only for the exact normalized endpoint it belongs to.
@@ -423,6 +431,118 @@ export function prepareGrokBuildQuickSetup({
       smoke: true,
       probeTools: true,
     },
+  };
+}
+
+
+/**
+ * Dashboard "Test" probes the *configured* installation only.
+ * Form selections are ignored so a dirty picker cannot rewrite intent.
+ * Empty apiKey lets the server reuse the stored key for the same endpoint.
+ */
+export function buildGrokBuildDashboardTestPayload({
+  status = null,
+} = {}) {
+  const configured = status?.settings?.model || null;
+  const baseUrl = normalizeGrokBuildBaseUrl(configured?.base_url);
+  const model = typeof configured?.model === "string" ? configured.model.trim() : "";
+
+  if (!status?.installed || !baseUrl || !model) {
+    return {
+      ok: false,
+      error: "Configure Grok Build before testing health",
+      payload: null,
+    };
+  }
+
+  return {
+    ok: true,
+    error: null,
+    payload: {
+      baseUrl,
+      apiKey: "",
+      model,
+      smoke: true,
+      probeOnly: true,
+      probeTools: true,
+    },
+  };
+}
+
+/**
+ * Dashboard Apply payload with safe key semantics:
+ * 1) real selected key → send it
+ * 2) matching configured endpoint + hasApiKey → empty string (server reuses)
+ * 3) local/non-cloud → sk_9router
+ * 4) cloud with no key/reuse → abort (never send null)
+ */
+export function buildGrokBuildDashboardApplyPayload({
+  baseUrl = "",
+  model = "",
+  selectedApiKey = "",
+  configuredModel = null,
+  cloudEnabled = false,
+} = {}) {
+  const normalizedBaseUrl = normalizeGrokBuildBaseUrl(baseUrl);
+  const modelId = typeof model === "string" ? model.trim() : "";
+
+  if (!normalizedBaseUrl) {
+    return { ok: false, error: "Endpoint is required", payload: null };
+  }
+  if (!modelId) {
+    return { ok: false, error: "Select a model first", payload: null };
+  }
+
+  const selected = typeof selectedApiKey === "string" ? selectedApiKey.trim() : "";
+  if (selected) {
+    return {
+      ok: true,
+      error: null,
+      payload: {
+        baseUrl: normalizedBaseUrl,
+        apiKey: selected,
+        model: modelId,
+        smoke: true,
+      },
+    };
+  }
+
+  const storedBase = normalizeGrokBuildBaseUrl(configuredModel?.base_url);
+  const canReuseStored =
+    !!storedBase
+    && storedBase === normalizedBaseUrl
+    && configuredModel?.hasApiKey === true;
+
+  if (canReuseStored) {
+    return {
+      ok: true,
+      error: null,
+      payload: {
+        baseUrl: normalizedBaseUrl,
+        apiKey: "",
+        model: modelId,
+        smoke: true,
+      },
+    };
+  }
+
+  if (!cloudEnabled) {
+    return {
+      ok: true,
+      error: null,
+      payload: {
+        baseUrl: normalizedBaseUrl,
+        apiKey: "sk_9router",
+        model: modelId,
+        smoke: true,
+      },
+    };
+  }
+
+  return {
+    ok: false,
+    error: "API key is required",
+    payload: null,
   };
 }
 

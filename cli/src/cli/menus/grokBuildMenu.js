@@ -93,11 +93,25 @@ async function grokBuildQuickSetup(port, dependencyOverrides = null) {
     return null;
   }
 
-  const apiKey = await getFirstApiKey(deps);
+  const firstApiKey = await getFirstApiKey(deps);
+  let cloudEnabled = false;
+  try {
+    const settingsRes = await deps.api.getSettings();
+    if (settingsRes?.success) {
+      cloudEnabled = settingsRes.data?.cloudEnabled === true;
+    }
+  } catch {
+    // soft — treat as local when settings cannot be loaded
+  }
+
+  let apiKey = firstApiKey;
   if (!apiKey) {
-    deps.showStatus("No API keys found. Create one in API Keys menu first.", "error");
-    await deps.pause();
-    return null;
+    if (cloudEnabled) {
+      deps.showStatus("No API keys found. Create one in API Keys menu first.", "error");
+      await deps.pause();
+      return null;
+    }
+    apiKey = "sk_9router";
   }
 
   const { endpoint } = await deps.getEndpoint(port);

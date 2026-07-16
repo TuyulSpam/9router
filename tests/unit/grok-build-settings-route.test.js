@@ -213,4 +213,64 @@ api_key = "sk_stored_secret"
     expect(body.health.status).toBe("healthy");
     expect(fsMocks.writeFile).toHaveBeenCalledTimes(1);
   });
+
+  it("normalizes trailing-slash baseUrl before smoke and Apply", async () => {
+    global.fetch = vi.fn(async (url, init = {}) => {
+      expect(String(url)).toContain("http://127.0.0.1:20128/v1/");
+      // shared normalizer collapses trailing slash before /models
+      expect(String(url)).toMatch(/\/v1\/(models|chat\/completions)$/);
+      if (String(url).endsWith("/models")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ data: [{ id: "Kelas-berat" }] }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ choices: [{ message: { content: "pong" } }] }),
+        text: async () => "{}",
+      };
+    });
+
+    const response = await POST(requestWith({
+      baseUrl: "http://127.0.0.1:20128/v1/",
+      apiKey: "sk_test",
+      model: "Kelas-berat",
+      probeOnly: true,
+      probeTools: true,
+    }));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.probeOnly).toBe(true);
+    expect(body.health.status).toBe("healthy");
+    expect(fsMocks.writeFile).not.toHaveBeenCalled();
+  });
+
+  it("Apply with omitted key reuses stored key only for matching endpoint", async () => {
+    fsMocks.readFile.mockResolvedValue(`[models]
+default = "9router"
+
+[model.9router]
+model = "Kelas-berat"
+base_url = "http://127.0.0.1:20128/v1"
+api_key = "sk_stored_apply"
+`);
+    const response = await POST(requestWith({
+      baseUrl: "http://127.0.0.1:20128/v1/",
+      model: "Kelas-berat",
+      smoke: false,
+    }));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.success).toBe(true);
+    expect(fsMocks.writeFile).toHaveBeenCalledTimes(1);
+    const written = fsMocks.writeFile.mock.calls[0][1];
+    expect(written).toContain('api_key = "sk_stored_apply"');
+    expect(written).toContain('base_url = "http://127.0.0.1:20128/v1"');
+    expect(JSON.stringify(body)).not.toContain("sk_stored_apply");
+  });
 });
