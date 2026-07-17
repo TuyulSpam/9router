@@ -5,13 +5,18 @@ set -euo pipefail
 REPO="${REPO:-/home/ubuntu/9router}"
 BACKUP_ROOT="${BACKUP_ROOT:-/home/ubuntu/openclaw-backups}"
 GLOBAL_PKG="${GLOBAL_PKG:-/home/ubuntu/.npm-global/lib/node_modules/9router}"
-TGZ_DEFAULT="${TGZ_DEFAULT:-/home/ubuntu/9router-0.5.30.tgz}"
 
 cd "$REPO"
 HEAD="$(git rev-parse HEAD)"
 SHORT="$(git rev-parse --short HEAD)"
 PIN="$BACKUP_ROOT/9router-known-good-$SHORT"
 TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# Prefer live installed version; fall back to package.json / last known.
+PKG_VERSION="$(node -e "console.log(require('$GLOBAL_PKG/package.json').version)" 2>/dev/null \
+  || node -e "console.log(require('$REPO/package.json').version)" 2>/dev/null \
+  || echo "0.5.35")"
+TGZ_DEFAULT="${TGZ_DEFAULT:-/home/ubuntu/9router-${PKG_VERSION}.tgz}"
 
 mkdir -p "$PIN"/{tarball,global-snapshot,meta}
 
@@ -22,9 +27,9 @@ else
 fi
 
 if [[ -f "$TGZ_DEFAULT" ]]; then
-  cp -a "$TGZ_DEFAULT" "$PIN/tarball/9router-0.5.30.tgz"
-  cp -a "$TGZ_DEFAULT" "$PIN/tarball/9router-0.5.30-${SHORT}.tgz"
-elif [[ -f "$PIN/tarball/9router-0.5.30.tgz" ]]; then
+  cp -a "$TGZ_DEFAULT" "$PIN/tarball/9router-${PKG_VERSION}.tgz"
+  cp -a "$TGZ_DEFAULT" "$PIN/tarball/9router-${PKG_VERSION}-${SHORT}.tgz"
+elif ls "$PIN/tarball"/9router-*.tgz >/dev/null 2>&1; then
   echo "WARN: using existing tarball in pin (no $TGZ_DEFAULT)" >&2
 else
   echo "WARN: no tarball found — pin has global snapshot only" >&2

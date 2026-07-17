@@ -9,7 +9,9 @@ set -euo pipefail
 REPO="${REPO:-/home/ubuntu/9router}"
 BACKUP_ROOT="${BACKUP_ROOT:-/home/ubuntu/openclaw-backups}"
 GLOBAL_PKG="${GLOBAL_PKG:-/home/ubuntu/.npm-global/lib/node_modules/9router}"
-TGZ="${TGZ:-/home/ubuntu/9router-0.5.30.tgz}"
+# Prefer versioned home tarball matching package.json when present.
+_PKG_VER="$(node -e "console.log(require('$REPO/package.json').version)" 2>/dev/null || echo "0.5.35")"
+TGZ="${TGZ:-/home/ubuntu/9router-${_PKG_VER}.tgz}"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:20128/api/health}"
 VERSION_URL="${VERSION_URL:-http://127.0.0.1:20128/api/version}"
 
