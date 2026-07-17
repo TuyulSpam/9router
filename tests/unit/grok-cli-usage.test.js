@@ -404,8 +404,10 @@ describe("getUsageForProvider(grok-cli)", () => {
   });
 
   it("reports active paid access when provider exposes no numeric quota", async () => {
+    // credits + plain monthly + user (parallel fetch order in getGrokCliUsage)
     proxyAwareFetch
       .mockResolvedValueOnce(jsonResponse(EXHAUSTED_BILLING))
+      .mockResolvedValueOnce(jsonResponse({ config: {} }))
       .mockResolvedValueOnce(jsonResponse({
         ...USER_PROFILE,
         subscriptionTier: "XPremiumPlus",
@@ -416,7 +418,7 @@ describe("getUsageForProvider(grok-cli)", () => {
       accessToken: "test-token",
     });
 
-    expect(usage.plan).toBe("XPremiumPlus");
+    expect(usage.plan).toMatch(/Premium Plus/i);
     expect(usage.message).toMatch(/active.*numeric included quota/i);
     expect(usage.quotas).toEqual({});
   });
