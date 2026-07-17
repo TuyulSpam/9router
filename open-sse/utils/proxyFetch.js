@@ -214,7 +214,9 @@ function resolveConnectionProxyUrl(targetUrl, proxyOptions) {
 }
 
 /**
- * Create proxy dispatcher lazily (undici-compatible)
+ * Create proxy dispatcher lazily (undici-compatible).
+ * Returns { agent, fetch } so callers always use undici's fetch with ProxyAgent.
+ * Node's global fetch + undici ProxyAgent can return gzip without decode → Invalid JSON.
  */
 async function getDispatcher(proxyUrl) {
   const normalized = normalizeProxyUrl(proxyUrl);
@@ -225,11 +227,20 @@ async function getDispatcher(proxyUrl) {
     if (proxyDispatchers.size >= MEMORY_CONFIG.proxyDispatchersMaxSize) {
       proxyDispatchers.delete(proxyDispatchers.keys().next().value);
     }
-    const { ProxyAgent } = await import("undici");
-    proxyDispatchers.set(normalized, new ProxyAgent({ uri: normalized }));
+    const undici = await import("undici");
+    proxyDispatchers.set(normalized, {
+      agent: new undici.ProxyAgent({ uri: normalized }),
+      fetch: undici.fetch,
+    });
   }
 
   return proxyDispatchers.get(normalized);
+}
+
+async function fetchViaProxy(url, options, proxyUrl) {
+  const entry = await getDispatcher(proxyUrl);
+  if (!entry) return originalFetch(url, options);
+  return entry.fetch(url, { ...options, dispatcher: entry.agent });
 }
 
 /**
@@ -315,8 +326,7 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
     if (proxyUrl) {
       // Proxy resolves DNS externally (not affected by /etc/hosts) — use proxy directly
       try {
-        const dispatcher = await getDispatcher(proxyUrl);
-        return await originalFetch(url, { ...options, dispatcher });
+        return await fetchViaProxy(url, options, proxyUrl);
       } catch (proxyError) {
         if (proxyOptions?.strictProxy === true) {
           throw new Error(`[ProxyFetch] Proxy required but failed (strictProxy=true): ${proxyError.message}`);
@@ -336,8 +346,7 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
 
   if (proxyUrl) {
     try {
-      const dispatcher = await getDispatcher(proxyUrl);
-      return await originalFetch(url, { ...options, dispatcher });
+      return await fetchViaProxy(url, options, proxyUrl);
     } catch (proxyError) {
       // If strictProxy is enabled, fail hard instead of falling back to direct
       if (proxyOptions?.strictProxy === true) {

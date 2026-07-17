@@ -3,7 +3,7 @@
  */
 
 import { proxyAwareFetch } from "../../utils/proxyFetch.js";
-import { U, parseResetTime, toFiniteNumber } from "./shared.js";
+import { U, parseResetTime, toFiniteNumber, parseJsonResponse } from "./shared.js";
 
 // Codex (OpenAI) API config
 const CODEX_CONFIG = {
@@ -80,21 +80,28 @@ function getCodexReviewRateLimit(data) {
   }) || null;
 }
 
-export async function getCodexUsage(accessToken, proxyOptions = null) {
+export async function getCodexUsage(accessToken, proxyOptions = null, providerSpecificData = null) {
   try {
+    const accountId = getCodexAccountId(providerSpecificData);
+    const headers = {
+      "Authorization": "Bearer " + accessToken,
+      "Accept": "application/json",
+      "Accept-Encoding": "identity",
+      "OpenAI-Beta": "codex-1",
+      "originator": "codex_cli_rs",
+    };
+    if (accountId) headers["ChatGPT-Account-ID"] = accountId;
+
     const response = await proxyAwareFetch(CODEX_CONFIG.usageUrl, {
       method: "GET",
-      headers: {
-        "Authorization": `Bearer ${accessToken}`,
-        "Accept": "application/json",
-      },
+      headers,
     }, proxyOptions);
 
     if (!response.ok) {
       return { message: `Codex connected. Usage API temporarily unavailable (${response.status}).` };
     }
 
-    const data = await response.json();
+    const data = await parseJsonResponse(response, { label: "Codex usage API" });
     const normalRateLimit = data.rate_limit || data.rate_limits || data.rate_limits_by_limit_id?.codex || {};
     const reviewRateLimit = getCodexReviewRateLimit(data);
     const availableResetCredits = Math.max(0, toFiniteNumber(data.rate_limit_reset_credits?.available_count, 0));

@@ -4,7 +4,7 @@
 
 import { CLIENT_METADATA } from "../../config/appConstants.js";
 import { ANTIGRAVITY_IDE_USER_AGENT, ANTIGRAVITY_IDE_VERSION, ANTIGRAVITY_OAUTH_CLIENT } from "../../providers/shared.js";
-import { U, parseResetTime, normalizeCloudCodeProjectId, fetchWithTimeout } from "./shared.js";
+import { U, parseResetTime, normalizeCloudCodeProjectId, fetchWithTimeout, parseJsonResponse } from "./shared.js";
 
 // Antigravity API config (from Quotio) — urls from registry, oauth client + dynamic UA kept here
 const ANTIGRAVITY_CONFIG = {
@@ -49,6 +49,7 @@ export async function getGeminiUsage(accessToken, providerSpecificData, proxyOpt
         headers: {
           Authorization: `Bearer ${accessToken}`,
           "Content-Type": "application/json",
+          "Accept-Encoding": "identity",
         },
         body: JSON.stringify({ project: projectId }),
       },
@@ -60,7 +61,7 @@ export async function getGeminiUsage(accessToken, providerSpecificData, proxyOpt
       return { plan, message: `Gemini CLI quota error (${response.status}).` };
     }
 
-    const data = await response.json();
+    const data = await parseJsonResponse(response, { label: "Gemini quota API" });
     const quotas = {};
 
     if (Array.isArray(data.buckets)) {
@@ -100,6 +101,7 @@ async function getGeminiSubscriptionInfo(accessToken, proxyOptions = null) {
         headers: {
           Authorization: `Bearer ${accessToken}`,
           "Content-Type": "application/json",
+          "Accept-Encoding": "identity",
         },
         body: JSON.stringify({ metadata: CLIENT_METADATA }),
       },
@@ -107,7 +109,7 @@ async function getGeminiSubscriptionInfo(accessToken, proxyOptions = null) {
       proxyOptions
     );
     if (!response.ok) return null;
-    return await response.json();
+    return await parseJsonResponse(response, { label: "Gemini subscription API" });
   } catch {
     return null;
   }
@@ -128,6 +130,7 @@ export async function getAntigravityUsage(accessToken, providerSpecificData, pro
         "Authorization": `Bearer ${accessToken}`,
         "User-Agent": ANTIGRAVITY_CONFIG.userAgent,
         "Content-Type": "application/json",
+        "Accept-Encoding": "identity",
         "X-Client-Name": "antigravity",
         "X-Client-Version": ANTIGRAVITY_IDE_VERSION,
       },
@@ -154,7 +157,7 @@ export async function getAntigravityUsage(accessToken, providerSpecificData, pro
       throw new Error(`Antigravity API error: ${response.status}`);
     }
 
-    const data = await response.json();
+    const data = await parseJsonResponse(response, { label: "Antigravity quota API" });
     const quotas = {};
 
     // Parse model quotas (inspired by vscode-antigravity-cockpit)
@@ -228,12 +231,13 @@ async function getAntigravitySubscriptionInfo(accessToken, proxyOptions = null) 
         "Authorization": `Bearer ${accessToken}`,
         "User-Agent": ANTIGRAVITY_CONFIG.userAgent,
         "Content-Type": "application/json",
+        "Accept-Encoding": "identity",
       },
       body: JSON.stringify({ metadata: CLIENT_METADATA, mode: 1 }),
     }, 10000, proxyOptions);
 
     if (!response.ok) return null;
-    return await response.json();
+    return await parseJsonResponse(response, { label: "Antigravity subscription API" });
   } catch (error) {
     console.error("[Antigravity Subscription] Error:", error.message);
     return null;
