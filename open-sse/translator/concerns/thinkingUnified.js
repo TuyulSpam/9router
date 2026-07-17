@@ -216,10 +216,17 @@ function stripAll(body) {
 // Map requested OpenAI effort to a level the model accepts.
 // Preserve when listed in getThinkingLevels; else nearest high-end sibling.
 // Unknown/empty metadata keeps legacy safe max/ultra → xhigh clamp.
+// "none" on models that omit disable from their matrix falls to the lowest effort.
 export function resolveOpenAiEffort(level, provider, model) {
   if (!level) return level;
   const allowed = getThinkingLevels(provider, model);
   if (Array.isArray(allowed) && allowed.includes(level)) return level;
+  if (level === "none" || level === "off") {
+    if (Array.isArray(allowed) && allowed.length) {
+      return allowed.find((l) => l !== "none" && l !== "auto") || allowed[0];
+    }
+    return "low";
+  }
   if (level === "ultra") {
     if (Array.isArray(allowed) && allowed.includes("max")) return "max";
     return "xhigh";
@@ -237,7 +244,13 @@ function applyFormat(fmt, body, cfg, caps, model = null, provider = null) {
 
   switch (fmt) {
     case "openai": {
-      if (none && canDisable) { body.reasoning_effort = "none"; break; }
+      // Prefer disable when allowed; models without "none" (e.g. *codex*) clamp via resolveOpenAiEffort.
+      if (none) {
+        body.reasoning_effort = canDisable
+          ? resolveOpenAiEffort("none", provider, model)
+          : resolveOpenAiEffort("minimal", provider, model);
+        break;
+      }
       const level = toLevel(eff);
       // Config-driven: preserve supported effort; nearest sibling otherwise.
       if (level) body.reasoning_effort = resolveOpenAiEffort(level, provider, model);
@@ -342,4 +355,37 @@ export function applyThinking(targetFormat, model, body, provider = null, intent
   stripAll(body);
   applyFormat(fmt, body, cfg, caps, cleanModel, provider);
   return body;
+}
+
+/**
+ * Apply dashboard providerThinking as a DEFAULT only.
+ * Never overrides client thinking intent (reasoning.effort, reasoning_effort,
+ * Claude thinking, Gemini thinkingConfig, Qwen enable_thinking, etc.).
+ *
+ * mode "none" must set an explicit none intent so downstream executors
+ * (e.g. Codex) do not fall back to their own default effort.
+ *
+ * @param {object} body
+ * @param {{ mode?: string } | null | undefined} providerThinking
+ * @returns {object}
+ */
+export function applyProviderThinkingDefault(body, providerThinking) {
+  if (!body || typeof body !== "object") return body;
+  const mode = providerThinking?.mode;
+  if (!mode || mode === "auto") return body;
+
+  // Client already chose thinking → provider setting is only a fallback.
+  if (extractThinking(body)) return body;
+
+  if (mode === "none") {
+    return { ...body, reasoning_effort: "none" };
+  }
+  if (mode === "on") {
+    return { ...body, thinking: { type: "enabled", budget_tokens: 10000 } };
+  }
+  if (mode === "off") {
+    return { ...body, thinking: { type: "disabled" } };
+  }
+  // Discrete effort levels (low/medium/high/xhigh/max/ultra/minimal/thinking)
+  return { ...body, reasoning_effort: mode };
 }
