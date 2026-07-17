@@ -29,6 +29,11 @@
 import { gunzipSync } from "zlib";
 import { proxyAwareFetch } from "../../utils/proxyFetch.js";
 import { U, parseResetTime, toFiniteNumber } from "./shared.js";
+import {
+  GROK_CLI_CLIENT_IDENTIFIER,
+  GROK_CLI_USER_AGENT,
+  GROK_CLI_VERSION,
+} from "../../config/grokCli.js";
 
 const USAGE = U("grok-cli");
 const BILLING_URL = USAGE.url || "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
@@ -97,10 +102,11 @@ function buildGrokCliHeaders(accessToken, providerSpecificData = {}) {
     // Avoid compressed bodies: undici ProxyAgent path often fails to decompress gzip,
     // which surfaces as "billing response was not JSON" in the quota tracker.
     "Accept-Encoding": "identity",
-    "User-Agent": "grok-pager/0.2.93 grok-shell/0.2.93 (linux; x86_64)",
+    "User-Agent": GROK_CLI_USER_AGENT,
     "x-xai-token-auth": "xai-grok-cli",
-    "x-grok-client-identifier": "grok-pager",
-    "x-grok-client-version": "0.2.93",
+    "x-grok-client-identifier": GROK_CLI_CLIENT_IDENTIFIER,
+    "x-grok-client-version": GROK_CLI_VERSION,
+    "x-grok-client-mode": "headless",
   };
   const email = psd.email;
   const userId = psd.userId || psd.principalId;
@@ -109,8 +115,18 @@ function buildGrokCliHeaders(accessToken, providerSpecificData = {}) {
   return headers;
 }
 
+function subscriptionTier(user, config) {
+  const rawTier =
+    user?.subscriptionTier ??
+    user?.subscription_tier ??
+    user?.subscription?.tier ??
+    config?.subscriptionTier ??
+    config?.subscription_tier;
+  return typeof rawTier === "string" ? rawTier.trim() : "";
+}
+
 function resolvePlan(user, config) {
-  const tier = typeof user?.subscriptionTier === "string" ? user.subscriptionTier.trim() : "";
+  const tier = subscriptionTier(user, config);
   if (tier) return humanizeIdentifier(tier) || tier;
   if (user?.hasGrokCodeAccess === true) return "Grok Code";
   if (config?.isUnifiedBillingUser === true) return "Grok Build";
@@ -174,11 +190,42 @@ export function parseGrokCliBilling(billing, user = null, plainBilling = null) {
 
   const periodEnd =
     parseResetTime(config.billingPeriodEnd) ||
+    parseResetTime(config.billing_period_end) ||
     parseResetTime(config.currentPeriod?.end) ||
+    parseResetTime(config.resetAt || config.resetsAt || config.periodEnd) ||
     parseResetTime(root.billingPeriodEnd) ||
+    parseResetTime(root.billing_period_end) ||
+    parseResetTime(root.resetAt || root.resetsAt || root.periodEnd) ||
     null;
 
   const quotas = {};
+  const tier = subscriptionTier(user, config);
+  const subscriptionAccess = Boolean(tier) && !/^(free|none|null)$/i.test(tier);
+
+  // Current Grok Build responses expose included monthly usage at top level.
+  const monthlyLimit = unwrapVal(
+    config.monthlyLimit ?? config.monthly_limit ?? root.monthlyLimit ?? root.monthly_limit,
+    NaN,
+  );
+  const includedUsed = unwrapVal(
+    config.includedUsed ?? config.included_used ?? root.includedUsed ?? root.included_used,
+    NaN,
+  );
+  const totalUsed = unwrapVal(
+    config.totalUsed ?? config.total_used ?? root.totalUsed ?? root.total_used,
+    NaN,
+  );
+  if (Number.isFinite(monthlyLimit) && monthlyLimit > 0) {
+    quotas["Monthly included"] = makeQuota({
+      used: Number.isFinite(includedUsed)
+        ? includedUsed
+        : Number.isFinite(totalUsed)
+          ? totalUsed
+          : 0,
+      total: monthlyLimit,
+      resetAt: periodEnd,
+    });
+  }
 
   // ── 1. Unified / SuperGrok: percent-based weekly credits ─────────────────
   // Live SuperGrok accounts return creditUsagePercent + productUsage while
@@ -228,14 +275,16 @@ export function parseGrokCliBilling(billing, user = null, plainBilling = null) {
     });
   } else if (
     // Only synthesize depleted On-demand when we have nothing better to show.
-    // Unified accounts keep onDemandCap=0 even with remaining weekly/monthly credits
-    // (percent fields or plain /v1/billing monthly) — never treat that as free-promo exhausted.
+    // Unified/paid accounts keep onDemandCap=0 even with remaining credits.
     !hasPercentQuota &&
     !isUnifiedBillingUser &&
+    !subscriptionAccess &&
     Number.isFinite(onDemandCap) &&
     onDemandCap === 0 &&
     Number.isFinite(onDemandUsed)
   ) {
+    // Cap 0 is the exhausted free/promo state (chat returns 402 spending-limit).
+    // UI treats total===0 as unlimited, so use a synthetic 1/1 depleted row.
     quotas["On-demand"] = {
       used: 1,
       total: 1,
@@ -326,6 +375,7 @@ export function parseGrokCliBilling(billing, user = null, plainBilling = null) {
     quotas,
     periodEnd,
     exhausted,
+    subscriptionAccess,
     rawConfig: config,
   };
 }
@@ -395,8 +445,9 @@ export async function getGrokCliUsage(accessToken, providerSpecificData = null, 
     if (!parsed.quotas || Object.keys(parsed.quotas).length === 0) {
       return {
         plan: parsed.plan,
-        message:
-          "Grok Build connected, but no credit allotment was returned. Free promo may be exhausted — upgrade at https://grok.com/supergrok or add credits at https://grok.com/?_s=usage.",
+        message: parsed.subscriptionAccess
+          ? "Subscription access is active; Grok does not expose a numeric included quota."
+          : "Grok Build connected, but no credit allotment was returned. Free promo may be exhausted.",
         quotas: {},
       };
     }
