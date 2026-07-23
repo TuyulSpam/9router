@@ -26,7 +26,10 @@ describe("ops/smoke-thinking.sh", () => {
     expect(result.stderr).toContain("--run");
   });
 
-  it("verifies provider-owned thinking from request observability", () => {
+  it.each([
+    { kelasProvider: "codex", expectedOutput: "kelas_berat_codex_effort=max" },
+    { kelasProvider: "grok-cli", expectedOutput: "kelas_berat_grok_cli_effort=xhigh" },
+  ])("verifies provider-owned thinking through $kelasProvider", ({ kelasProvider, expectedOutput }) => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "9router-smoke-thinking-"));
     tempDirs.push(tempDir);
     const fakeBin = path.join(tempDir, "bin");
@@ -38,7 +41,7 @@ describe("ops/smoke-thinking.sh", () => {
 
     const schema = `
       CREATE TABLE settings (id INTEGER PRIMARY KEY, data TEXT NOT NULL);
-      INSERT INTO settings(id, data) VALUES(1, '{"providerThinking":{"codex":{"mode":"ultra"},"antigravity":{"mode":"xhigh"}}}');
+      INSERT INTO settings(id, data) VALUES(1, '{"providerThinking":{"codex":{"mode":"ultra"},"antigravity":{"mode":"xhigh"},"grok-cli":{"mode":"xhigh"}}}');
       CREATE TABLE requestDetails (id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, provider TEXT, model TEXT, connectionId TEXT, status TEXT, data TEXT NOT NULL);
     `;
     const dbResult = spawnSync("sqlite3", [dbPath, schema], { encoding: "utf8" });
@@ -68,9 +71,10 @@ let provider;
 let model;
 let data;
 if (body.model === "Kelas-berat") {
-  provider = "codex";
-  model = "gpt-5.6-sol";
-  data = { request: { input: body.input, reasoning: { effort: "max", summary: "auto" } } };
+  provider = process.env.FAKE_KELAS_PROVIDER || "codex";
+  model = provider === "grok-cli" ? "grok-4.5-high" : "gpt-5.6-sol";
+  const effort = provider === "grok-cli" ? "xhigh" : "max";
+  data = { request: { input: body.input, reasoning: { effort, summary: "auto" } } };
 } else {
   provider = "antigravity";
   model = "gemini-3-flash-agent";
@@ -104,11 +108,12 @@ process.stdout.write("200");
         BASE_URL: "http://fake/v1",
         DB_PATH: dbPath,
         LIVE_PACKAGE: livePackage,
+        FAKE_KELAS_PROVIDER: kelasProvider,
       },
     });
 
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
-    expect(result.stdout).toContain("kelas_berat_codex_effort=max");
+    expect(result.stdout).toContain(expectedOutput);
     expect(result.stdout).toContain("ag_gemini_thinking_level=high");
     expect(result.stdout).toContain("SMOKE OK");
   });

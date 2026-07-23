@@ -139,7 +139,7 @@ Smoke ini mengirim dua request model nyata dan membaca payload upstream dari `re
 
 Ekspektasi default mesin ini:
 
-- `Kelas-berat` diberi effort klien `medium`, tetapi upstream Codex menerima `max` dari setting provider `ultra`.
+- `Kelas-berat` diberi effort klien `medium`, lalu upstream menerima effort setting provider yang terpilih: Codex `ultra` → `max`, atau Grok CLI `xhigh` → `xhigh`.
 - `ag/gemini-3-flash-agent` tidak diberi effort klien dan upstream Antigravity menerima `thinkingLevel: high` dari setting provider `xhigh`.
 
 `deploy-live.sh --pin` menjalankan smoke ini otomatis sebelum memperbarui known-good.

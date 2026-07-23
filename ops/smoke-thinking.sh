@@ -18,6 +18,8 @@ EXPECTED_CODEX_MODE="${EXPECTED_CODEX_MODE:-ultra}"
 EXPECTED_CODEX_EFFORT="${EXPECTED_CODEX_EFFORT:-max}"
 EXPECTED_AG_MODE="${EXPECTED_AG_MODE:-xhigh}"
 EXPECTED_AG_LEVEL="${EXPECTED_AG_LEVEL:-high}"
+EXPECTED_GROK_MODE="${EXPECTED_GROK_MODE:-xhigh}"
+EXPECTED_GROK_EFFORT="${EXPECTED_GROK_EFFORT:-xhigh}"
 
 for command_name in curl node pm2 sqlite3; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
@@ -49,6 +51,7 @@ printf 'live_build_id=%s\n' "$(tr -d '\r\n' < "$LIVE_BUILD_ID_FILE")"
 
 CODEX_MODE="$(sqlite3 "$DB_PATH" "SELECT json_extract(data,'$.providerThinking.codex.mode') FROM settings WHERE id=1;")"
 AG_MODE="$(sqlite3 "$DB_PATH" "SELECT json_extract(data,'$.providerThinking.antigravity.mode') FROM settings WHERE id=1;")"
+GROK_MODE="$(sqlite3 "$DB_PATH" "SELECT json_extract(data,'$.providerThinking.\"grok-cli\".mode') FROM settings WHERE id=1;")"
 if [[ "$CODEX_MODE" != "$EXPECTED_CODEX_MODE" ]]; then
   echo "ERROR: expected Codex providerThinking=$EXPECTED_CODEX_MODE, got ${CODEX_MODE:-missing}" >&2
   exit 1
@@ -57,7 +60,11 @@ if [[ "$AG_MODE" != "$EXPECTED_AG_MODE" ]]; then
   echo "ERROR: expected Antigravity providerThinking=$EXPECTED_AG_MODE, got ${AG_MODE:-missing}" >&2
   exit 1
 fi
-printf 'provider_modes=codex:%s,antigravity:%s\n' "$CODEX_MODE" "$AG_MODE"
+if [[ "$GROK_MODE" != "$EXPECTED_GROK_MODE" ]]; then
+  echo "ERROR: expected Grok CLI providerThinking=$EXPECTED_GROK_MODE, got ${GROK_MODE:-missing}" >&2
+  exit 1
+fi
+printf 'provider_modes=codex:%s,antigravity:%s,grok-cli:%s\n' "$CODEX_MODE" "$AG_MODE" "$GROK_MODE"
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -104,12 +111,26 @@ if ! KELAS_ROW="$(wait_for_value "$KELAS_QUERY")"; then
   exit 1
 fi
 IFS='|' read -r KELAS_PROVIDER KELAS_MODEL KELAS_EFFORT <<< "$KELAS_ROW"
-if [[ "$KELAS_PROVIDER" != "codex" || "$KELAS_EFFORT" != "$EXPECTED_CODEX_EFFORT" ]]; then
-  echo "ERROR: Kelas-berat expected codex/$EXPECTED_CODEX_EFFORT, got $KELAS_PROVIDER/$KELAS_MODEL/$KELAS_EFFORT" >&2
+case "$KELAS_PROVIDER" in
+  codex)
+    KELAS_EXPECTED_EFFORT="$EXPECTED_CODEX_EFFORT"
+    KELAS_PROVIDER_LABEL="codex"
+    ;;
+  grok-cli)
+    KELAS_EXPECTED_EFFORT="$EXPECTED_GROK_EFFORT"
+    KELAS_PROVIDER_LABEL="grok_cli"
+    ;;
+  *)
+    echo "ERROR: Kelas-berat selected unexpected provider $KELAS_PROVIDER/$KELAS_MODEL" >&2
+    exit 1
+    ;;
+esac
+if [[ "$KELAS_EFFORT" != "$KELAS_EXPECTED_EFFORT" ]]; then
+  echo "ERROR: Kelas-berat expected $KELAS_PROVIDER/$KELAS_EXPECTED_EFFORT, got $KELAS_PROVIDER/$KELAS_MODEL/$KELAS_EFFORT" >&2
   exit 1
 fi
 printf 'kelas_berat_route=%s/%s\n' "$KELAS_PROVIDER" "$KELAS_MODEL"
-printf 'kelas_berat_codex_effort=%s\n' "$KELAS_EFFORT"
+printf 'kelas_berat_%s_effort=%s\n' "$KELAS_PROVIDER_LABEL" "$KELAS_EFFORT"
 
 AG_MARKER="ag-thinking-smoke-$(date +%s%N)"
 AG_START="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
