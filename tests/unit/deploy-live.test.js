@@ -98,6 +98,27 @@ if [[ "\${1:-}" == "--prefix" && "\${2:-}" == "cli" && "\${3:-}" == "pack" ]]; t
       shift
     fi
   done
+  mkdir -p "$destination"
+  echo wrong-root-package > "$destination/9router-app-9.9.9.tgz"
+  echo 9router-app-9.9.9.tgz
+  exit 0
+fi
+
+if [[ "\${1:-}" == "pack" ]]; then
+  if [[ "$PWD" != "$REPO/cli" ]]; then
+    echo "npm pack must run from the CLI package directory" >&2
+    exit 42
+  fi
+  destination=""
+  shift
+  while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "--pack-destination" ]]; then
+      destination="$2"
+      shift 2
+    else
+      shift
+    fi
+  done
   mkdir -p "$destination" "$FAKE_PACKAGE_ROOT/package/app/.next-cli-build"
   printf '%s' '{"name":"9router","version":"9.9.9"}' > "$FAKE_PACKAGE_ROOT/package/package.json"
   echo fresh-build-id > "$FAKE_PACKAGE_ROOT/package/app/.next-cli-build/BUILD_ID"

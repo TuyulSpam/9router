@@ -75,7 +75,7 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
   echo "=== cli:build ==="
   npm --prefix cli run build
   echo "=== cli:pack ==="
-  npm --prefix cli pack --pack-destination "$BK"
+  (cd "$REPO/cli" && npm pack --silent --pack-destination "$BK")
   TGZ="$BK/9router-${_PKG_VER}.tgz"
   if [[ -n "$TGZ_OVERRIDE" ]]; then
     mkdir -p "$(dirname "$TGZ_OVERRIDE")"
