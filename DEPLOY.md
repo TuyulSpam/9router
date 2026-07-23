@@ -149,8 +149,13 @@ Ekspektasi default mesin ini:
 ```bash
 /home/ubuntu/9router/ops/restore-known-good.sh
 # atau pin path eksplisit:
-/home/ubuntu/9router/ops/restore-known-good.sh ~/openclaw-backups/9router-known-good-4705177e
+/home/ubuntu/9router/ops/restore-known-good.sh ~/openclaw-backups/9router-known-good-96e698b6
 ```
+
+Restore memprioritaskan `global-snapshot/9router`. Jika snapshot tidak tersedia,
+script membaca `pkg_version` dari `meta/MANIFEST.txt` untuk memilih tarball
+kanonis `tarball/9router-<version>.tgz`; pin legacy tanpa manifest hanya diterima
+jika tepat satu tarball tersedia.
 
 Manual:
 

@@ -22,9 +22,34 @@ fi
 # Resolve symlink
 PIN="$(readlink -f "$PIN")"
 SNAP="$PIN/global-snapshot/9router"
-TGZ="$PIN/tarball/9router-0.5.30.tgz"
+TGZ=""
 
-if [[ ! -d "$SNAP" && ! -f "$TGZ" ]]; then
+if [[ ! -d "$SNAP" ]]; then
+  PKG_VERSION=""
+  if [[ -f "$PIN/meta/MANIFEST.txt" ]]; then
+    PKG_VERSION="$(awk -F= '$1 == "pkg_version" { sub(/^[^=]*=/, ""); print; exit }' "$PIN/meta/MANIFEST.txt")"
+  fi
+
+  if [[ "$PKG_VERSION" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*$ ]]; then
+    MANIFEST_TGZ="$PIN/tarball/9router-${PKG_VERSION}.tgz"
+    [[ -f "$MANIFEST_TGZ" ]] && TGZ="$MANIFEST_TGZ"
+  fi
+
+  if [[ -z "$TGZ" ]]; then
+    shopt -s nullglob
+    TGZ_CANDIDATES=("$PIN"/tarball/9router-*.tgz)
+    shopt -u nullglob
+    if [[ ${#TGZ_CANDIDATES[@]} -eq 1 ]]; then
+      TGZ="${TGZ_CANDIDATES[0]}"
+    elif [[ ${#TGZ_CANDIDATES[@]} -gt 1 ]]; then
+      echo "ERROR: multiple restore tarballs found and manifest does not select one:" >&2
+      printf '  %s\n' "${TGZ_CANDIDATES[@]}" >&2
+      exit 1
+    fi
+  fi
+fi
+
+if [[ ! -d "$SNAP" && ( -z "$TGZ" || ! -f "$TGZ" ) ]]; then
   echo "ERROR: pin has neither global-snapshot nor tarball: $PIN" >&2
   exit 1
 fi
