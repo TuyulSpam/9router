@@ -1171,6 +1171,11 @@ Model: cc/claude-opus-4-7
 <details>
 <summary><b>🚀 Deployment</b></summary>
 
+> **Maintainer runbook:** The patched-host deploy, known-good pin, tarball-only
+> rollback, and live provider-thinking smoke procedure are documented in
+> [`DEPLOY.md`](./DEPLOY.md). The latest rollback drill passed on July 23, 2026;
+> do not run `npm update -g` on that pinned host.
+
 ### VPS Deployment
 
 ```bash

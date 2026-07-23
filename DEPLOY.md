@@ -157,6 +157,18 @@ script membaca `pkg_version` dari `meta/MANIFEST.txt` untuk memilih tarball
 kanonis `tarball/9router-<version>.tgz`; pin legacy tanpa manifest hanya diterima
 jika tepat satu tarball tersedia.
 
+### Drill restore terakhir — 2026-07-23
+
+- Sumber pin: `~/openclaw-backups/9router-known-good-96e698b6`
+- Mode: tarball-only melalui salinan drill tanpa `global-snapshot/9router`
+- Artifact terpilih: `tarball/9router-0.5.35.tgz`, berdasarkan `pkg_version` manifest
+- Hasil: health `ok`, version `0.5.35`, marker source `96e698b6`, dan smoke provider-thinking `ok`
+- Audit mesin: `~/.9router/LAST_RESTORE_DRILL`
+- Safety backup dipertahankan di `~/openclaw-backups/9router-pre-restore-20260724-002548`
+
+Drill tidak memperbarui pin dan tidak menjalankan deploy source baru; live tetap
+pada known-good `96e698b6`.
+
 Manual:
 
 ```bash
