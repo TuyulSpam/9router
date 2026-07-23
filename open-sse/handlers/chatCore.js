@@ -1,6 +1,6 @@
 import { detectFormat, getTargetFormat, resolveTransport } from "../services/provider.js";
 import { translateRequest } from "../translator/index.js";
-import { stripThinkingSuffix } from "../translator/concerns/thinkingUnified.js";
+import { isRouterManagedThinkingModel, stripThinkingSuffix } from "../translator/concerns/thinkingUnified.js";
 import { FORMATS } from "../translator/formats.js";
 import { normalizeClaudePassthrough } from "../translator/formats/claude.js";
 import { createStreamController } from "../utils/streamHandler.js";
@@ -66,9 +66,11 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const stripList = getModelStrip(alias, model);
   const upstreamModel = getModelUpstreamId(alias, model);
 
-  // Provider dashboard thinking is a DEFAULT only (never overrides client intent).
-  // mode "none" must remain an explicit intent so Codex does not fall back to low.
-  body = applyProviderThinkingDefault(body, providerThinking);
+  // Router-managed combos choose the backend after the client request is built,
+  // so their selected provider owns thinking instead of client fallback metadata.
+  const clientModel = clientRawRequest?.body?.model || body.model;
+  const forceProviderThinking = isRouterManagedThinkingModel(clientModel);
+  body = applyProviderThinkingDefault(body, providerThinking, { force: forceProviderThinking });
 
   const clientRequestedStreaming = body.stream === true || sourceFormat === FORMATS.ANTIGRAVITY || sourceFormat === FORMATS.GEMINI || sourceFormat === FORMATS.GEMINI_CLI;
   const providerRequiresStreaming = PROVIDERS[provider]?.forceStream === true;

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   applyProviderThinkingDefault,
   applyThinking,
+  isRouterManagedThinkingModel,
 } from "../../open-sse/translator/concerns/thinkingUnified.js";
 import { CodexExecutor } from "../../open-sse/executors/codex.js";
 
@@ -67,6 +68,41 @@ describe("applyProviderThinkingDefault", () => {
       { mode: "off" },
     );
     expect(offBody.thinking).toEqual({ type: "disabled" });
+  });
+
+  it("replaces client thinking when the router owns the decision", () => {
+    const body = {
+      messages: [{ role: "user", content: "hi" }],
+      reasoning: { effort: "medium", summary: "auto" },
+      reasoning_effort: "low",
+      thinking: { type: "enabled", budget_tokens: 4096 },
+      generationConfig: { thinkingConfig: { thinkingLevel: "low" } },
+      request: { generationConfig: { thinkingConfig: { thinkingBudget: 1024 } } },
+      enable_thinking: true,
+      thinking_budget: 2048,
+    };
+
+    const out = applyProviderThinkingDefault(body, { mode: "ultra" }, { force: true });
+
+    expect(out.reasoning_effort).toBe("ultra");
+    expect(out.reasoning).toBeUndefined();
+    expect(out.thinking).toBeUndefined();
+    expect(out.generationConfig.thinkingConfig).toBeUndefined();
+    expect(out.request.generationConfig.thinkingConfig).toBeUndefined();
+    expect(out.enable_thinking).toBeUndefined();
+    expect(out.thinking_budget).toBeUndefined();
+  });
+});
+
+describe("isRouterManagedThinkingModel", () => {
+  it("matches Kelas-berat with or without a thinking suffix", () => {
+    expect(isRouterManagedThinkingModel("Kelas-berat")).toBe(true);
+    expect(isRouterManagedThinkingModel("Kelas-berat(high)")).toBe(true);
+  });
+
+  it("does not force router thinking for other models", () => {
+    expect(isRouterManagedThinkingModel("Kelas-menengah")).toBe(false);
+    expect(isRouterManagedThinkingModel("cx/gpt-5.6-sol")).toBe(false);
   });
 });
 

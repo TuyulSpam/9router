@@ -28,6 +28,12 @@ export function stripThinkingSuffix(model) {
   return m ? m[1].trim() : model;
 }
 
+const ROUTER_MANAGED_THINKING_MODELS = new Set(["Kelas-berat"]);
+
+export function isRouterManagedThinkingModel(model) {
+  return ROUTER_MANAGED_THINKING_MODELS.has(stripThinkingSuffix(model));
+}
+
 // Parse model-name suffix "model(value)" → { cleanModel, override }.
 // value: level name (high) | number (8192) | auto | none. null override when absent.
 export function parseSuffix(model) {
@@ -364,24 +370,31 @@ export function applyThinking(targetFormat, model, body, provider = null, intent
 }
 
 /**
- * Apply dashboard providerThinking as a DEFAULT only.
- * Never overrides client thinking intent (reasoning.effort, reasoning_effort,
- * Claude thinking, Gemini thinkingConfig, Qwen enable_thinking, etc.).
+ * Apply dashboard providerThinking as a default, or force it for router-managed
+ * models whose backend is selected after the client request is created.
  *
  * mode "none" must set an explicit none intent so downstream executors
  * (e.g. Codex) do not fall back to their own default effort.
  *
  * @param {object} body
  * @param {{ mode?: string } | null | undefined} providerThinking
+ * @param {{ force?: boolean }} options
  * @returns {object}
  */
-export function applyProviderThinkingDefault(body, providerThinking) {
+export function applyProviderThinkingDefault(body, providerThinking, { force = false } = {}) {
   if (!body || typeof body !== "object") return body;
   const mode = providerThinking?.mode;
-  if (!mode || mode === "auto") return body;
+  if (!mode) return body;
 
-  // Client already chose thinking → provider setting is only a fallback.
-  if (extractThinking(body)) return body;
+  if (force) {
+    stripAll(body);
+    if (mode === "auto") return body;
+  } else {
+    if (mode === "auto") return body;
+
+    // Client already chose thinking → provider setting is only a fallback.
+    if (extractThinking(body)) return body;
+  }
 
   if (mode === "none") {
     return { ...body, reasoning_effort: "none" };
