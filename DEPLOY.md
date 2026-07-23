@@ -6,14 +6,14 @@ Dokumen operasional untuk mesin ini (`/home/ubuntu/9router` → PM2 `9router` di
 
 | Field | Value |
 |---|---|
-| **Live app binary** | `4705177e` (see `.openclaw-source-commit`) |
-| **Full commit** | `4705177efe2512e72760fca6a87a3dd03e681bff` |
-| **Branch** | `deploy-2584` (= tip `upgrade/v0.5.35`) |
+| **Live app binary** | `96e698b6` (see `.openclaw-source-commit`) |
+| **Full commit** | `96e698b605d9d76f4609252b9b0d2a077d8499da` |
+| **Branch** | `fix/router-thinking-deploy-hardening` |
 | **Version** | `0.5.35` |
 | **Upstream base** | `decolua/9router` **v0.5.35** (`bc252ea8`) + patch lokal |
-| **Pin dir (latest)** | `~/openclaw-backups/9router-known-good-latest` → `9router-known-good-4705177e` |
+| **Pin dir (latest)** | `~/openclaw-backups/9router-known-good-latest` → `9router-known-good-96e698b6` |
 | **Pointer** | `~/.9router/KNOWN_GOOD_COMMIT` / `KNOWN_GOOD_PATH` / `KNOWN_GOOD_SHORT` |
-| **Health (saat pin)** | `{"ok":true}` · `hasUpdate:false` |
+| **Health (saat pin)** | `{"ok":true}` · latest upstream `0.5.40` tersedia, live tetap pinned `0.5.35` |
 
 ### Stack yang termasuk pin ini
 
@@ -29,6 +29,9 @@ Dokumen operasional untuk mesin ini (`/home/ubuntu/9router` → PM2 `9router` di
 - Console Log polish (level tags, filters, pause, redact, download)
 - Grok CLI usage: gzip `Accept-Encoding: identity` + SuperGrok percent + paid-access guards
 - RTK/HEADROOM single `⚙` console summary line
+- Provider-owned thinking untuk `Kelas-berat`; Codex `ultra` mencapai wire effort `max`
+- Default subagent `ag/gemini-3-flash-agent`; Antigravity `xhigh` mencapai `thinkingLevel: high`
+- Deploy artifact unik + SHA-256/`BUILD_ID` verification + smoke-before-pin
 - Prior PR stack: #2523 Codex effort, #2572 SuperGrok %, #2571 Grok Build setup, #2534 composer strip, #2554 tunnel SSE, #2604 expiresAt, #2562 Token Saver, #2570 Codex plan labels, #2609 Token-Saver off header, #2584 Antigravity MITM
 - Headroom proxy — PM2 `headroom` on `:8787`
 - Ops: `ops/deploy-live.sh`, `ops/pin-known-good.sh`, `ops/restore-known-good.sh`
