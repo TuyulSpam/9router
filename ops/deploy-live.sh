@@ -63,6 +63,15 @@ echo "backup=$BK"
 # 2) Build into the unique backup directory so a stale fixed-path tarball
 # can never be selected by a normal source deploy.
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
+  BUILD_CACHE="$REPO/.next-cli-build/cache"
+  if [[ -L "$BUILD_CACHE" ]]; then
+    echo "ERROR: refusing to remove symlinked build cache: $BUILD_CACHE" >&2
+    exit 1
+  fi
+  if [[ -d "$BUILD_CACHE" ]]; then
+    rm -rf -- "$BUILD_CACHE"
+    echo "cleared_build_cache=$BUILD_CACHE"
+  fi
   echo "=== cli:build ==="
   npm --prefix cli run build
   echo "=== cli:pack ==="

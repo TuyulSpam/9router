@@ -45,10 +45,12 @@ describe("ops/deploy-live.sh", () => {
 
     fs.mkdirSync(path.join(fakeRepo, "cli"), { recursive: true });
     fs.mkdirSync(path.join(fakeRepo, "ops"), { recursive: true });
+    fs.mkdirSync(path.join(fakeRepo, ".next-cli-build/cache"), { recursive: true });
     fs.mkdirSync(path.join(globalPackage, "app/.next-cli-build"), { recursive: true });
     fs.mkdirSync(fakeBin, { recursive: true });
     fs.writeFileSync(path.join(fakeRepo, "package.json"), JSON.stringify({ name: "9router-app", version: "9.9.9" }));
     fs.writeFileSync(path.join(fakeRepo, "cli/package.json"), JSON.stringify({ name: "9router", version: "9.9.9" }));
+    fs.writeFileSync(path.join(fakeRepo, ".next-cli-build/cache/stale.pack"), "corrupt-cache");
     fs.writeFileSync(path.join(globalPackage, "app/.next-cli-build/BUILD_ID"), "old-live-build\n");
     fs.writeFileSync(path.join(globalPackage, "app/.openclaw-source-commit"), "old-commit\n");
     writeExecutable(path.join(fakeRepo, "ops/smoke-thinking.sh"), "#!/usr/bin/env bash\necho \"$*\" > \"$FAKE_SMOKE_LOG\"\n");
@@ -76,6 +78,10 @@ set -euo pipefail
 echo "$*" >> "$FAKE_NPM_LOG"
 
 if [[ "\${1:-}" == "--prefix" && "\${2:-}" == "cli" && "\${3:-}" == "run" && "\${4:-}" == "build" ]]; then
+  if [[ -e "$REPO/.next-cli-build/cache/stale.pack" ]]; then
+    echo "stale webpack cache was not cleared" >&2
+    exit 41
+  fi
   mkdir -p "$REPO/cli/app/.next-cli-build"
   echo fresh-build-id > "$REPO/cli/app/.next-cli-build/BUILD_ID"
   exit 0

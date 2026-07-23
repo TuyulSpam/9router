@@ -76,7 +76,7 @@ Script akan:
 
 1. Cek working tree (warn jika dirty pada file tracked)
 2. Backup global install → `~/openclaw-backups/9router-pre-deploy-<timestamp>/`
-3. Build CLI lalu `npm pack` langsung ke direktori backup unik
+3. Bersihkan cache webpack production, build CLI, lalu `npm pack` langsung ke direktori backup unik
 4. Verifikasi version, SHA-256, dan packaged `BUILD_ID`
 5. `npm install -g` artifact yang sama dan cocokkan live `BUILD_ID`
 6. Tulis `.openclaw-source-commit` = `git rev-parse HEAD`
