@@ -9,9 +9,9 @@ set -euo pipefail
 REPO="${REPO:-/home/ubuntu/9router}"
 BACKUP_ROOT="${BACKUP_ROOT:-/home/ubuntu/openclaw-backups}"
 GLOBAL_PKG="${GLOBAL_PKG:-/home/ubuntu/.npm-global/lib/node_modules/9router}"
-# Prefer versioned home tarball matching package.json when present.
 _PKG_VER="$(node -e "console.log(require('$REPO/package.json').version)" 2>/dev/null || echo "0.5.35")"
-TGZ="${TGZ:-/home/ubuntu/9router-${_PKG_VER}.tgz}"
+TGZ_OVERRIDE="${TGZ:-}"
+DEFAULT_TGZ="/home/ubuntu/9router-${_PKG_VER}.tgz"
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:20128/api/health}"
 VERSION_URL="${VERSION_URL:-http://127.0.0.1:20128/api/version}"
 
@@ -60,23 +60,79 @@ fi
 } > "$BK/MANIFEST.txt"
 echo "backup=$BK"
 
-# 2) Build
+# 2) Build into the unique backup directory so a stale fixed-path tarball
+# can never be selected by a normal source deploy.
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
+  echo "=== cli:build ==="
+  npm --prefix cli run build
   echo "=== cli:pack ==="
-  npm run cli:pack
+  npm --prefix cli pack --pack-destination "$BK"
+  TGZ="$BK/9router-${_PKG_VER}.tgz"
+  if [[ -n "$TGZ_OVERRIDE" ]]; then
+    mkdir -p "$(dirname "$TGZ_OVERRIDE")"
+    cp -a "$TGZ" "$TGZ_OVERRIDE"
+    echo "artifact_copy=$TGZ_OVERRIDE"
+  fi
 else
   echo "=== skip build ==="
+  SOURCE_TGZ="${TGZ_OVERRIDE:-$DEFAULT_TGZ}"
+  if [[ ! -f "$SOURCE_TGZ" ]]; then
+    echo "ERROR: tarball missing: $SOURCE_TGZ" >&2
+    exit 1
+  fi
+  TGZ="$BK/$(basename "$SOURCE_TGZ")"
+  cp -a "$SOURCE_TGZ" "$TGZ"
 fi
 
 if [[ ! -f "$TGZ" ]]; then
   echo "ERROR: tarball missing: $TGZ" >&2
   exit 1
 fi
-cp -a "$TGZ" "$BK/"
+
+PACKED_VERSION="$(tar -xOf "$TGZ" package/package.json | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).version))')"
+if [[ "$PACKED_VERSION" != "$_PKG_VER" ]]; then
+  echo "ERROR: artifact version mismatch: expected $_PKG_VER, got $PACKED_VERSION" >&2
+  exit 1
+fi
+
+PACKED_BUILD_ID="$(tar -xOf "$TGZ" package/app/.next-cli-build/BUILD_ID | tr -d '\r\n')"
+if [[ -z "$PACKED_BUILD_ID" ]]; then
+  echo "ERROR: artifact BUILD_ID missing: $TGZ" >&2
+  exit 1
+fi
+
+if [[ "$SKIP_BUILD" -eq 0 ]]; then
+  SOURCE_BUILD_ID="$(tr -d '\r\n' < "$REPO/cli/app/.next-cli-build/BUILD_ID")"
+  if [[ "$PACKED_BUILD_ID" != "$SOURCE_BUILD_ID" ]]; then
+    echo "ERROR: artifact BUILD_ID mismatch: source=$SOURCE_BUILD_ID packed=$PACKED_BUILD_ID" >&2
+    exit 1
+  fi
+fi
+
+ARTIFACT_SHA256="$(sha256sum "$TGZ" | awk '{print $1}')"
+ARTIFACT_SIZE="$(stat -c '%s' "$TGZ")"
+echo "artifact=$TGZ"
+echo "artifact_sha256=$ARTIFACT_SHA256"
+echo "artifact_size=$ARTIFACT_SIZE"
+echo "artifact_build_id=$PACKED_BUILD_ID"
+{
+  echo "artifact=$TGZ"
+  echo "artifact_version=$PACKED_VERSION"
+  echo "artifact_sha256=$ARTIFACT_SHA256"
+  echo "artifact_size=$ARTIFACT_SIZE"
+  echo "artifact_build_id=$PACKED_BUILD_ID"
+} >> "$BK/MANIFEST.txt"
 
 # 3) Install
 echo "=== npm install -g ==="
 npm install -g "$TGZ"
+
+LIVE_BUILD_ID="$(tr -d '\r\n' < "$GLOBAL_PKG/app/.next-cli-build/BUILD_ID")"
+if [[ "$LIVE_BUILD_ID" != "$PACKED_BUILD_ID" ]]; then
+  echo "ERROR: installed BUILD_ID mismatch: packed=$PACKED_BUILD_ID live=$LIVE_BUILD_ID" >&2
+  exit 1
+fi
+echo "live_build_id=$LIVE_BUILD_ID"
 
 # 4) Source marker (must survive for diagnostics)
 mkdir -p "$GLOBAL_PKG/app"
@@ -120,8 +176,10 @@ fi
 
 # 7) Optional re-pin
 if [[ "$DO_PIN" -eq 1 ]]; then
+  echo "=== provider-thinking smoke ==="
+  "$REPO/ops/smoke-thinking.sh" --run
   echo "=== pin known-good ==="
-  "$REPO/ops/pin-known-good.sh"
+  TGZ_DEFAULT="$TGZ" "$REPO/ops/pin-known-good.sh"
 fi
 
 {

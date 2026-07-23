@@ -76,12 +76,12 @@ Script akan:
 
 1. Cek working tree (warn jika dirty pada file tracked)
 2. Backup global install → `~/openclaw-backups/9router-pre-deploy-<timestamp>/`
-3. `npm run cli:pack` (tarball default: `~/9router-<package.version>.tgz`)
-4. `npm install -g` tarball
-5. Tulis `.openclaw-source-commit` = `git rev-parse HEAD`
-6. `pm2 restart 9router`
-7. Poll `GET /api/health` sampai OK (**cold start bisa 1–2 menit**)
-8. Opsional: `--pin` untuk refresh known-good snapshot
+3. Build CLI lalu `npm pack` langsung ke direktori backup unik
+4. Verifikasi version, SHA-256, dan packaged `BUILD_ID`
+5. `npm install -g` artifact yang sama dan cocokkan live `BUILD_ID`
+6. Tulis `.openclaw-source-commit` = `git rev-parse HEAD`
+7. `pm2 restart 9router` dan poll `GET /api/health`
+8. Dengan `--pin`: jalankan smoke provider-thinking, lalu refresh known-good memakai artifact terverifikasi
 
 ### Manual (setara) — prefer worktree bersih
 
@@ -120,9 +120,26 @@ curl -s http://127.0.0.1:20128/api/version
 
 ### Verifikasi tarball (wajib)
 
-- `sha1sum` tarball == `npm notice shasum` di log pack
-- Tolak hash tarball known-stale / size mencurigakan (~13MB biasanya corrupt/salah pack)
-- Cek string fitur lokal di artifact (contoh: `Search logs`, Grok Build helpers)
+- Artifact normal harus berada di backup deploy unik, bukan path tarball home yang dapat stale.
+- Packaged `BUILD_ID` harus sama dengan `cli/app/.next-cli-build/BUILD_ID` hasil build.
+- Live `BUILD_ID` setelah install harus sama dengan packaged `BUILD_ID`.
+- SHA-256, ukuran, version, dan `BUILD_ID` dicatat di `MANIFEST.txt` backup deploy.
+- Tolak ukuran mencurigakan (~13MB pada build penuh biasanya artifact salah/stale).
+
+### Smoke provider-thinking
+
+Smoke ini mengirim dua request model nyata dan membaca payload upstream dari `requestDetails`:
+
+```bash
+/home/ubuntu/9router/ops/smoke-thinking.sh --run
+```
+
+Ekspektasi default mesin ini:
+
+- `Kelas-berat` diberi effort klien `medium`, tetapi upstream Codex menerima `max` dari setting provider `ultra`.
+- `ag/gemini-3-flash-agent` tidak diberi effort klien dan upstream Antigravity menerima `thinkingLevel: high` dari setting provider `xhigh`.
+
+`deploy-live.sh --pin` menjalankan smoke ini otomatis sebelum memperbarui known-good.
 
 ## Restore known-good
 
