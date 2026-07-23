@@ -200,7 +200,18 @@ export function parseGrokCliBilling(billing, user = null, plainBilling = null) {
 
   const quotas = {};
   const tier = subscriptionTier(user, config);
-  const subscriptionAccess = Boolean(tier) && !/^(free|none|null)$/i.test(tier);
+  const isUnifiedBillingUser =
+    config.isUnifiedBillingUser === true || root.isUnifiedBillingUser === true;
+  const hasGrokCodeAccess =
+    user?.hasGrokCodeAccess === true ||
+    config?.hasGrokCodeAccess === true ||
+    root?.hasGrokCodeAccess === true;
+  // Paid/unified/code-access accounts are not free-promo — even when numeric
+  // credit meters are omitted from the billing payload.
+  const subscriptionAccess =
+    (Boolean(tier) && !/^(free|none|null)$/i.test(tier)) ||
+    isUnifiedBillingUser ||
+    hasGrokCodeAccess;
 
   // Current Grok Build responses expose included monthly usage at top level.
   const monthlyLimit = unwrapVal(
@@ -260,10 +271,7 @@ export function parseGrokCliBilling(billing, user = null, plainBilling = null) {
     quotas.Credits = makePercentQuota(creditUsagePercent, periodEnd);
     hasPercentQuota = true;
   }
-
   // ── 2. Absolute on-demand window (promo / older account types) ───────────
-  const isUnifiedBillingUser =
-    config.isUnifiedBillingUser === true || root.isUnifiedBillingUser === true;
   const onDemandCap = unwrapVal(config.onDemandCap ?? root.onDemandCap, NaN);
   const onDemandUsed = unwrapVal(config.onDemandUsed ?? root.onDemandUsed, NaN);
   if (Number.isFinite(onDemandCap) && onDemandCap > 0) {
@@ -350,16 +358,26 @@ export function parseGrokCliBilling(billing, user = null, plainBilling = null) {
   // ── 5. Plain /v1/billing monthly absolute window ─────────────────────────
   if (plainBilling && typeof plainBilling === "object") {
     const { config: plainConfig } = extractConfig(plainBilling);
-    const monthlyLimit = unwrapVal(plainConfig.monthlyLimit, NaN);
+    const plainMonthlyLimit = unwrapVal(plainConfig.monthlyLimit, NaN);
     const monthlyUsed = unwrapVal(plainConfig.used, NaN);
     const monthlyReset = parseResetTime(plainConfig.billingPeriodEnd) || null;
 
-    if (Number.isFinite(monthlyLimit) && monthlyLimit > 0) {
+    if (Number.isFinite(plainMonthlyLimit) && plainMonthlyLimit > 0) {
       quotas.Monthly = makeQuota({
         used: Number.isFinite(monthlyUsed) ? Math.max(0, monthlyUsed) : 0,
-        total: monthlyLimit,
+        total: plainMonthlyLimit,
         resetAt: monthlyReset,
       });
+    } else if (Number.isFinite(monthlyUsed) && monthlyUsed > 0) {
+      // Grok Code / soft-cap accounts report used with monthlyLimit=0.
+      // Surface usage as an unlimited bar instead of dropping the row.
+      quotas.Monthly = {
+        used: Math.max(0, monthlyUsed),
+        total: 0,
+        remainingPercentage: 100,
+        resetAt: monthlyReset,
+        unlimited: true,
+      };
     }
   }
 
@@ -446,7 +464,7 @@ export async function getGrokCliUsage(accessToken, providerSpecificData = null, 
       return {
         plan: parsed.plan,
         message: parsed.subscriptionAccess
-          ? "Subscription access is active; Grok does not expose a numeric included quota."
+          ? "Subscription access is active; Grok does not expose a numeric included quota for this account."
           : "Grok Build connected, but no credit allotment was returned. Free promo may be exhausted.",
         quotas: {},
       };

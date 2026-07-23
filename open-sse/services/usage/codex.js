@@ -34,13 +34,42 @@ function getCodexRateLimitBody(snapshot) {
 
 function formatCodexWindow(window) {
   const used = Math.max(0, Math.min(100, toFiniteNumber(window?.used_percent ?? window?.percent_used, 0)));
+  // Prefer absolute reset_at; fall back to reset_after_seconds (relative countdown).
+  const resetAt =
+    parseResetTime(window?.reset_at ?? window?.resets_at ?? window?.resetAt ?? null) ||
+    (() => {
+      const after = toFiniteNumber(window?.reset_after_seconds ?? window?.resetAfterSeconds, null);
+      if (after === null || after < 0) return null;
+      return new Date(Date.now() + after * 1000).toISOString();
+    })();
   return {
     used,
     total: 100,
     remaining: Math.max(0, 100 - used),
-    resetAt: parseResetTime(window?.reset_at ?? window?.resets_at ?? window?.resetAt ?? null),
+    resetAt,
     unlimited: false,
+    windowSeconds: toFiniteNumber(window?.limit_window_seconds ?? window?.window_seconds, null),
   };
+}
+
+/**
+ * Name Codex rate-limit windows by duration, not primary/secondary order.
+ * OpenAI has flipped which window is primary: Plus often exposes a 7-day
+ * (604800s) window as primary with secondary null — labeling that "session"
+ * misleads the quota tracker and breaks 5h auto-ping key lookup.
+ */
+function codexWindowBaseName(window, role = "primary") {
+  const secs = toFiniteNumber(
+    window?.limit_window_seconds ?? window?.window_seconds ?? window?.windowSeconds,
+    null,
+  );
+  if (secs !== null && secs > 0) {
+    if (secs <= 6 * 3600) return "session"; // ~5h
+    if (secs <= 36 * 3600) return "daily";
+    return "weekly"; // ~7d
+  }
+  // Legacy fallback when duration is omitted
+  return role === "secondary" ? "weekly" : "session";
 }
 
 function appendCodexQuotaWindows(quotas, prefix, snapshot) {
@@ -51,14 +80,22 @@ function appendCodexQuotaWindows(quotas, prefix, snapshot) {
   const secondary = rateLimit.secondary_window || rateLimit.secondary || snapshot.secondary_window || snapshot.secondary;
   let added = false;
 
-  if (primary) {
-    quotas[prefix ? `${prefix}_session` : "session"] = formatCodexWindow(primary);
+  const put = (window, role) => {
+    if (!window || typeof window !== "object") return;
+    const base = codexWindowBaseName(window, role);
+    // Avoid clobbering if both windows map to the same name; keep first (primary).
+    const key = prefix ? `${prefix}_${base}` : base;
+    if (quotas[key]) {
+      const alt = `${key}_${role}`;
+      quotas[alt] = formatCodexWindow(window);
+    } else {
+      quotas[key] = formatCodexWindow(window);
+    }
     added = true;
-  }
-  if (secondary) {
-    quotas[prefix ? `${prefix}_weekly` : "weekly"] = formatCodexWindow(secondary);
-    added = true;
-  }
+  };
+
+  put(primary, "primary");
+  put(secondary, "secondary");
 
   return added;
 }
@@ -98,6 +135,12 @@ export async function getCodexUsage(accessToken, proxyOptions = null, providerSp
     }, proxyOptions);
 
     if (!response.ok) {
+      // Surface 401/403 as auth-expired so the usage route force-refreshes the OAuth token.
+      if (response.status === 401 || response.status === 403) {
+        return {
+          message: `Codex authentication expired (${response.status}). Please re-authorize the connection.`,
+        };
+      }
       return { message: `Codex connected. Usage API temporarily unavailable (${response.status}).` };
     }
 

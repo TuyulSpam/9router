@@ -134,6 +134,14 @@ const USER_PROFILE = {
   subscriptionTier: null,
 };
 
+/** True free/promo profile — no Grok Code / paid subscription flags. */
+const FREE_USER_PROFILE = {
+  userId: "d84768dd-224d-4052-ba49-0d336fa9160c",
+  email: "free@example.com",
+  hasGrokCodeAccess: false,
+  subscriptionTier: null,
+};
+
 const SUPERGROK_USER = {
   ...USER_PROFILE,
   subscriptionTier: "XPremiumPlus",
@@ -235,7 +243,7 @@ describe("parseGrokCliBilling", () => {
   });
 
   it("marks depleted free/promo account as exhausted (legacy onDemandCap=0)", () => {
-    const parsed = parseGrokCliBilling(EXHAUSTED_BILLING, USER_PROFILE);
+    const parsed = parseGrokCliBilling(EXHAUSTED_BILLING, FREE_USER_PROFILE);
     expect(parsed.quotas["On-demand"].remainingPercentage).toBe(0);
     expect(parsed.exhausted).toBe(true);
   });
@@ -247,10 +255,33 @@ describe("parseGrokCliBilling", () => {
       PLAIN_MONTHLY_BILLING,
     );
     expect(parsed.quotas["On-demand"]).toBeUndefined();
+    expect(parsed.quotas.Credits).toBeUndefined();
     expect(parsed.quotas.Monthly).toMatchObject({
       used: 6689,
       total: 20000,
     });
+    expect(parsed.exhausted).toBe(false);
+  });
+
+  it("surfaces soft-cap monthly usage when monthlyLimit is zero", () => {
+    const parsed = parseGrokCliBilling(
+      UNIFIED_NO_PERCENT_BILLING,
+      USER_PROFILE,
+      {
+        config: {
+          monthlyLimit: { val: 0 },
+          used: { val: 6581 },
+          billingPeriodEnd: "2026-08-01T00:00:00+00:00",
+        },
+      },
+    );
+    expect(parsed.quotas.Monthly).toMatchObject({
+      used: 6581,
+      total: 0,
+      unlimited: true,
+      remainingPercentage: 100,
+    });
+    expect(parsed.quotas.Credits).toBeUndefined();
     expect(parsed.exhausted).toBe(false);
   });
 
@@ -389,7 +420,7 @@ describe("getUsageForProvider(grok-cli)", () => {
     proxyAwareFetch
       .mockResolvedValueOnce(jsonResponse(EXHAUSTED_BILLING))
       .mockResolvedValueOnce(jsonResponse({ config: {} }))
-      .mockResolvedValueOnce(jsonResponse(USER_PROFILE));
+      .mockResolvedValueOnce(jsonResponse(FREE_USER_PROFILE));
 
     const usage = await getUsageForProvider({
       provider: "grok-cli",
@@ -405,11 +436,15 @@ describe("getUsageForProvider(grok-cli)", () => {
 
   it("reports active paid access when provider exposes no numeric quota", async () => {
     // credits + plain monthly + user (parallel fetch order in getGrokCliUsage)
+    // Paid tier without Grok Code / unified flags and without percent meters.
     proxyAwareFetch
-      .mockResolvedValueOnce(jsonResponse(EXHAUSTED_BILLING))
+      .mockResolvedValueOnce(jsonResponse({
+        ...EXHAUSTED_BILLING,
+        config: { ...EXHAUSTED_BILLING.config, isUnifiedBillingUser: false },
+      }))
       .mockResolvedValueOnce(jsonResponse({ config: {} }))
       .mockResolvedValueOnce(jsonResponse({
-        ...USER_PROFILE,
+        ...FREE_USER_PROFILE,
         subscriptionTier: "XPremiumPlus",
       }));
 
@@ -419,6 +454,48 @@ describe("getUsageForProvider(grok-cli)", () => {
     });
 
     expect(usage.plan).toMatch(/Premium Plus/i);
+    expect(usage.message).toMatch(/active.*numeric included quota/i);
+    expect(usage.quotas).toEqual({});
+  });
+
+  it("returns soft-cap monthly usage without inventing a Credits quota", async () => {
+    proxyAwareFetch
+      .mockResolvedValueOnce(jsonResponse(UNIFIED_NO_PERCENT_BILLING))
+      .mockResolvedValueOnce(jsonResponse({
+        config: {
+          monthlyLimit: { val: 0 },
+          used: { val: 6581 },
+          billingPeriodEnd: "2026-08-01T00:00:00+00:00",
+        },
+      }))
+      .mockResolvedValueOnce(jsonResponse(USER_PROFILE));
+
+    const usage = await getUsageForProvider({
+      provider: "grok-cli",
+      accessToken: "test-token",
+    });
+
+    expect(usage.message).toBeUndefined();
+    expect(usage.plan).toBe("Grok Code");
+    expect(usage.quotas.Credits).toBeUndefined();
+    expect(usage.quotas.Monthly).toMatchObject({
+      used: 6581,
+      unlimited: true,
+    });
+  });
+
+  it("reports active Grok Code access when no numeric quota is exposed", async () => {
+    proxyAwareFetch
+      .mockResolvedValueOnce(jsonResponse(UNIFIED_NO_PERCENT_BILLING))
+      .mockResolvedValueOnce(jsonResponse({ config: {} }))
+      .mockResolvedValueOnce(jsonResponse(USER_PROFILE));
+
+    const usage = await getUsageForProvider({
+      provider: "grok-cli",
+      accessToken: "test-token",
+    });
+
+    expect(usage.plan).toBe("Grok Code");
     expect(usage.message).toMatch(/active.*numeric included quota/i);
     expect(usage.quotas).toEqual({});
   });
