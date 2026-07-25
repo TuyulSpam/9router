@@ -1,12 +1,24 @@
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const {
+  computeTracingRoot,
+  resolveNodeModulesRoot,
+} = require("./cli/scripts/cli-package-integrity.js");
 
 const projectRoot = dirname(fileURLToPath(import.meta.url));
-// CLI bundling needs workspace root so tracing includes hoisted node_modules (slim ~50MB).
-// Docker / default uses projectRoot so server.js lands at /app/server.js (not nested).
-const tracingRoot = process.env.NEXT_TRACING_ROOT_MODE === "workspace"
-  ? join(projectRoot, "..")
-  : projectRoot;
+// CLI bundling needs a tracing root that can see real dependency files.
+// For normal checkouts this is the workspace parent. For worktrees whose
+// node_modules packages symlink into another checkout, expand to the common
+// ancestor so Next standalone tracing does not drop react/@swc/helpers.
+const tracingRoot = computeTracingRoot({
+  projectRoot,
+  nodeModulesRoot: resolveNodeModulesRoot(projectRoot),
+  mode: process.env.NEXT_TRACING_ROOT_MODE === "workspace" ? "workspace" : "project",
+  envTracingRoot: process.env.NEXT_TRACING_ROOT,
+});
 const proxyClientMaxBodySize = process.env.NINEROUTER_PROXY_CLIENT_MAX_BODY_SIZE || "128mb";
 
 /** @type {import('next').NextConfig} */

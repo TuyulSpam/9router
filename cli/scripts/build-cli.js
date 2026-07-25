@@ -3,6 +3,13 @@
 const fs = require("fs");
 const path = require("path");
 const { execSync } = require("child_process");
+const {
+  assertStandaloneRuntimeModules,
+  REQUIRED_STANDALONE_MODULES,
+  resolveNodeModulesRoot,
+  findBestTracedNodeModules,
+  listMissingStandaloneModules,
+} = require("./cli-package-integrity");
 
 const cliDir = path.resolve(__dirname, "..");
 const appDir = path.resolve(cliDir, "..");
@@ -136,12 +143,35 @@ console.log("3️⃣  Copying Next.js standalone build to app/cli/app...");
 const standaloneRoot = path.join(appDir, ".next", "standalone");
 const standaloneRootResolved = path.join(buildDistDir, "standalone");
 let standaloneRootToUse = fs.existsSync(standaloneRootResolved) ? standaloneRootResolved : standaloneRoot;
-// Next.js 16 nests standalone output under the project name when NEXT_TRACING_ROOT_MODE=workspace
-// e.g. .next-cli-build/standalone/9router/server.js
-const pkgName = path.basename(appDir);
-const nestedRoot = path.join(standaloneRootToUse, pkgName);
-if (fs.existsSync(path.join(nestedRoot, "server.js")) && !fs.existsSync(path.join(standaloneRootToUse, "server.js"))) {
-  console.log(`ℹ️  Detected nested standalone output: ${pkgName}/`);
+// Next.js 16 nests standalone output under the project-relative path from
+// outputFileTracingRoot. For a normal checkout this is just the package name
+// (e.g. 9router/server.js). For expanded worktree tracing roots it may be a
+// deeper relative path (e.g. .config/superpowers/worktrees/9router/<branch>/).
+function findNestedStandaloneRoot(root) {
+  const direct = path.join(root, "server.js");
+  if (fs.existsSync(direct)) return root;
+  const queue = [root];
+  while (queue.length) {
+    const current = queue.shift();
+    let entries = [];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name === "node_modules" || entry.name === ".next" || entry.name === ".next-cli-build") continue;
+      const child = path.join(current, entry.name);
+      if (fs.existsSync(path.join(child, "server.js"))) return child;
+      queue.push(child);
+    }
+  }
+  return null;
+}
+const nestedRoot = findNestedStandaloneRoot(standaloneRootToUse);
+if (nestedRoot && nestedRoot !== standaloneRootToUse) {
+  console.log(`ℹ️  Detected nested standalone output: ${path.relative(standaloneRootToUse, nestedRoot) || "."}/`);
   standaloneRootToUse = nestedRoot;
 }
 const standaloneApp = fs.existsSync(path.join(standaloneRootToUse, "server.js"))
@@ -153,6 +183,25 @@ if (!fs.existsSync(standaloneApp)) {
   process.exit(1);
 }
 copyRecursive(standaloneApp, cliAppDir);
+
+// Expanded worktree tracing roots put the app under a deep relative path while
+// the densest traced dependency tree lives under a sibling path (for example
+// standalone/9router/node_modules). Prefer that tree over the nested app's own
+// package-symlink node_modules, which would otherwise copy full host installs.
+const tracedNodeModules = findBestTracedNodeModules(standaloneRootResolved) ||
+  findBestTracedNodeModules(standaloneRoot);
+if (tracedNodeModules) {
+  const destNm = path.join(cliAppDir, "node_modules");
+  const missingBefore = listMissingStandaloneModules(cliAppDir);
+  const destHasOnlySparse = missingBefore.length > 0;
+  if (destHasOnlySparse || !fs.existsSync(destNm)) {
+    if (fs.existsSync(destNm)) {
+      fs.rmSync(destNm, { recursive: true, force: true });
+    }
+    copyRecursive(tracedNodeModules, destNm);
+    console.log(`✅ Copied traced node_modules from ${path.relative(appDir, tracedNodeModules) || tracedNodeModules}`);
+  }
+}
 
 // Older nested-app layout stores traced node_modules at standalone root.
 const standaloneNodeModules = path.join(standaloneRootToUse, "node_modules");
@@ -181,9 +230,11 @@ function ensureModuleInBundle(pkg) {
     console.log(`✅ ${pkg} already bundled`);
     return;
   }
+  const realNmRoot = resolveNodeModulesRoot(appDir);
   const candidates = [
     path.join(appDir, "node_modules", pkg),
     path.join(rootDir, "node_modules", pkg),
+    path.join(realNmRoot, pkg),
   ];
   const src = candidates.find((p) => fs.existsSync(p));
   if (!src) {
@@ -195,6 +246,18 @@ function ensureModuleInBundle(pkg) {
   console.log(`✅ Bundled ${pkg}`);
 }
 ensureModuleInBundle("sql.js");
+// When Next tracing was too narrow (worktree package-symlink installs), copy the
+// critical runtime modules that the standalone server must be able to require.
+for (const pkg of REQUIRED_STANDALONE_MODULES) {
+  ensureModuleInBundle(pkg);
+}
+try {
+  assertStandaloneRuntimeModules(cliAppDir);
+  console.log("✅ Standalone runtime modules present");
+} catch (err) {
+  console.error(`❌ ${err.message}`);
+  process.exit(1);
+}
 const betterDir = path.join(cliAppDir, "node_modules", "better-sqlite3");
 if (fs.existsSync(betterDir)) {
   fs.rmSync(betterDir, { recursive: true, force: true });
