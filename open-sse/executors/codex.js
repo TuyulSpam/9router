@@ -68,6 +68,12 @@ function makeFirstChunkTimeoutError(timeoutMs = STREAM_FIRST_CHUNK_TIMEOUT_MS) {
   return err;
 }
 
+// Stable transport codes only for logs/debug. Never echo raw undici messages —
+// intermediate proxies have been observed to embed host/credential fragments.
+function stableTransportCode(error, fallback = "terminated") {
+  return error?.code || error?.cause?.code || error?.name || error?.cause?.name || fallback;
+}
+
 // Server-generated item id prefixes that Codex /responses cannot resolve when store=false
 const SERVER_ID_PATTERN = /^(rs|fc|resp|msg)_/;
 
@@ -345,14 +351,14 @@ export class CodexExecutor extends BaseExecutor {
         if (transportAttempt >= attempts) {
           // Log only a stable transport code/name — never raw undici messages that may
           // embed host/credential fragments from intermediate proxy layers.
-          const code = peek.matched || peek.transportError?.code || peek.transportError?.name || "terminated";
+          const code = peek.matched || stableTransportCode(peek.transportError);
           args.log?.warn?.("RETRY", `CODEX | pre-user-output transport code=${code} — retries exhausted (${transportAttempt}/${attempts})`);
           // Keep client-facing body generic; detailed transport cause stays in logs/DB via observability path.
           result.response = codexSseErrorResponse(HTTP_STATUS.BAD_GATEWAY, CODEX_PRE_USER_OUTPUT_TRANSPORT_MESSAGE);
           return result;
         }
         transportAttempt++;
-        const code = peek.matched || peek.transportError?.code || peek.transportError?.name || "terminated";
+        const code = peek.matched || stableTransportCode(peek.transportError);
         args.log?.debug?.("RETRY", `CODEX | pre-user-output transport code=${code} retry ${transportAttempt}/${attempts} after ${delayMs / 1000}s`);
         dbg("CODEX", `pre-user-output transport code=${code} → retry ${transportAttempt}/${attempts} in ${delayMs}ms`);
         await new Promise(r => setTimeout(r, delayMs));
@@ -390,6 +396,12 @@ export class CodexExecutor extends BaseExecutor {
     let firstChunkTimer = null;
     let sawFirstChunk = false;
     let sawUserOutput = false;
+    // First-output deadline covers the whole pre-user-output phase, including
+    // metadata-only prefixes. Stopping the timer on the first byte would leave
+    // hung "response.created then silence" streams unrecoverable.
+    const firstOutputDeadlineAt = STREAM_FIRST_CHUNK_TIMEOUT_MS > 0
+      ? Date.now() + STREAM_FIRST_CHUNK_TIMEOUT_MS
+      : null;
     const clearFirstChunkTimer = () => {
       if (firstChunkTimer) {
         clearTimeout(firstChunkTimer);
@@ -398,14 +410,20 @@ export class CodexExecutor extends BaseExecutor {
     };
     try {
       while (text.length < CODEX_SSE_PEEK_BYTES) {
-        // First-byte watchdog must live in peek: this path drains body bytes
+        // First-output watchdog must live in peek: this path drains body bytes
         // before pipeWithDisconnect can arm its own timer.
         let value;
         let done = false;
-        if (!sawFirstChunk && STREAM_FIRST_CHUNK_TIMEOUT_MS > 0) {
+        const remainingMs = firstOutputDeadlineAt == null
+          ? null
+          : firstOutputDeadlineAt - Date.now();
+        if (remainingMs != null && remainingMs <= 0) {
+          throw makeFirstChunkTimeoutError(STREAM_FIRST_CHUNK_TIMEOUT_MS);
+        }
+        if (remainingMs != null) {
           let timedOut = false;
-          // Attach a no-op catch so a late cancel of reader.read() cannot surface
-          // as an unhandled rejection after the timeout branch wins Promise.race.
+          // Settle late reader.read() after cancel so Promise.race cannot leave
+          // an unhandled rejection behind the timeout winner.
           const readPromise = reader.read().then(
             (result) => ({ ok: true, result }),
             (error) => ({ ok: false, error }),
@@ -414,14 +432,13 @@ export class CodexExecutor extends BaseExecutor {
             firstChunkTimer = setTimeout(() => {
               timedOut = true;
               resolve({ ok: false, error: makeFirstChunkTimeoutError(STREAM_FIRST_CHUNK_TIMEOUT_MS) });
-            }, STREAM_FIRST_CHUNK_TIMEOUT_MS);
+            }, remainingMs);
           });
           try {
             const raced = await Promise.race([readPromise, timeoutPromise]);
             if (!raced.ok) {
               if (timedOut || raced.error?.code === "STREAM_FIRST_CHUNK_TIMEOUT") {
                 try { await reader.cancel(raced.error); } catch { /* noop */ }
-                // Drain the pending read settlement after cancel so it never becomes unhandled.
                 await readPromise;
               }
               throw raced.error;
@@ -436,7 +453,6 @@ export class CodexExecutor extends BaseExecutor {
         if (done) break;
         if (!sawFirstChunk) {
           sawFirstChunk = true;
-          clearFirstChunkTimer();
         }
         chunks.push(value);
         text += decoder.decode(value, { stream: true });
@@ -445,6 +461,9 @@ export class CodexExecutor extends BaseExecutor {
         if (accountHit) { matched = accountHit; accountFallback = true; break; }
         const retryHit = CODEX_SSE_RETRY_PATTERNS.find(p => lowerText.includes(p));
         if (retryHit) { matched = retryHit; break; }
+        if (CODEX_SSE_TERMINAL_PATTERNS.some(p => lowerText.includes(p))) {
+          break;
+        }
         if (CODEX_SSE_USER_OUTPUT_PATTERNS.some(p => lowerText.includes(p))) {
           sawUserOutput = true;
           break;
@@ -472,7 +491,7 @@ export class CodexExecutor extends BaseExecutor {
       }
     } catch (e) {
       clearFirstChunkTimer();
-      dbg("CODEX", `peek read error: ${e.message}`);
+      dbg("CODEX", `peek read error: code=${stableTransportCode(e)}`);
       // Recoverable while no user-visible output has been observed yet.
       // Metadata-only prefixes are still safe to discard and retry.
       if (!sawUserOutput && isPreFirstByteTransportError(e)) {
