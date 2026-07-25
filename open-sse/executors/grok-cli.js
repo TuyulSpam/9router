@@ -12,10 +12,17 @@ import {
   GROK_CLI_VERSION,
   supportsGrokCliReasoningEffort,
 } from "../config/grokCli.js";
-import { MEMORY_CONFIG } from "../config/runtimeConfig.js";
+import {
+  DEFAULT_RETRY_CONFIG,
+  HTTP_STATUS,
+  MEMORY_CONFIG,
+  STREAM_FIRST_CHUNK_TIMEOUT_MS,
+  resolveRetryEntry,
+} from "../config/runtimeConfig.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
 import { getConsistentMachineId } from "../shared/machineId.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
+import { dbg } from "../utils/debugLog.js";
 
 // Server-generated item id prefixes that /responses cannot resolve when store=false
 const SERVER_ID_PATTERN = /^(rs|fc|resp|msg)_/;
@@ -60,6 +67,69 @@ const GROK_CLI_FREEFORM_TOOL_PARAMETERS = {
   properties: { input: { type: "string" } },
   required: ["input"],
 };
+
+const GROK_CLI_SSE_USER_OUTPUT_PATTERNS = [
+  "event: response.output_text.delta",
+  "event: response.function_call_arguments.delta",
+  "event: response.custom_tool_call_input.delta",
+  "event: response.reasoning_summary_text.delta",
+  '"type":"response.output_text.delta"',
+  '"type":"response.function_call_arguments.delta"',
+  '"type":"response.custom_tool_call_input.delta"',
+  '"type":"response.reasoning_summary_text.delta"',
+];
+const GROK_CLI_SSE_TERMINAL_PATTERNS = [
+  "event: response.completed",
+  "event: response.done",
+  "event: response.failed",
+  "event: error",
+  '"type":"response.completed"',
+  '"type":"response.done"',
+  '"type":"response.failed"',
+  '"type":"error"',
+];
+const GROK_CLI_PRE_USER_OUTPUT_TRANSPORT_MESSAGE = "upstream body terminated before first user output";
+const GROK_CLI_SSE_PEEK_BYTES = 256 * 1024;
+
+function isPreUserOutputTransportError(error) {
+  if (!error) return false;
+  if (
+    error.code === "STREAM_FIRST_CHUNK_TIMEOUT"
+    || error.code === "EMPTY_SSE_BODY"
+    || error.code === "INCOMPLETE_SSE_BODY"
+  ) return true;
+  if (error.name === "TimeoutError" && /first[- ]byte|first[- ]chunk/i.test(String(error.message || ""))) return true;
+  const message = String(error.message || "").toLowerCase();
+  const code = String(error.code || error.cause?.code || "");
+  if (error.name === "TypeError" && message.includes("terminated")) return true;
+  if (code === "UND_ERR_SOCKET" || code === "ECONNRESET" || code === "EPIPE" || code === "ETIMEDOUT") return true;
+  if (message.includes("other side closed") || message.includes("socket hang up") || message.includes("econnreset") || message.includes("epipe")) return true;
+  return false;
+}
+
+function makeFirstChunkTimeoutError(timeoutMs = STREAM_FIRST_CHUNK_TIMEOUT_MS) {
+  const error = new Error(`stream first-byte timeout after ${timeoutMs}ms`);
+  error.code = "STREAM_FIRST_CHUNK_TIMEOUT";
+  error.name = "TimeoutError";
+  return error;
+}
+
+function stableTransportCode(error, fallback = "terminated") {
+  return error?.code || error?.cause?.code || error?.name || error?.cause?.name || fallback;
+}
+
+function grokCliSseErrorResponse(status, message) {
+  return new Response(JSON.stringify({
+    error: {
+      message,
+      type: status >= 500 ? "server_error" : "invalid_request_error",
+      code: "upstream_error",
+    },
+  }), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
 
 // Per-session last turn index so multi-turn headers never go backwards within this process
 const sessionTurnStore = new Map();
@@ -551,7 +621,176 @@ export class GrokCliExecutor extends BaseExecutor {
       this._agentId = args.credentials.providerSpecificData.deviceId;
     }
 
-    return super.execute(args);
+    // Retry only for pre-user-output body transport death/empty body during peek.
+    // Once user-visible SSE output is observed we fail-fast to avoid token duplication.
+    const retryConfig = { ...DEFAULT_RETRY_CONFIG, ...this.config.retry };
+    const transportRetry = resolveRetryEntry(retryConfig[502]);
+    let transportAttempt = 0;
+
+    while (true) {
+      const result = await super.execute(args);
+      const peek = await this._peekSseTransientError(result.response);
+      if (!peek.matched) {
+        if (peek.replacementBody) {
+          result.response = new Response(peek.replacementBody, {
+            status: result.response.status,
+            statusText: result.response.statusText,
+            headers: result.response.headers,
+          });
+        }
+        return result;
+      }
+
+      const { attempts, delayMs } = transportRetry;
+      const code = peek.matched || stableTransportCode(peek.transportError);
+      if (transportAttempt >= attempts) {
+        args.log?.warn?.("RETRY", `GROK-CLI | pre-user-output transport code=${code} — retries exhausted (${transportAttempt}/${attempts})`);
+        result.response = grokCliSseErrorResponse(
+          HTTP_STATUS.BAD_GATEWAY,
+          GROK_CLI_PRE_USER_OUTPUT_TRANSPORT_MESSAGE,
+        );
+        return result;
+      }
+
+      transportAttempt++;
+      args.log?.debug?.("RETRY", `GROK-CLI | pre-user-output transport code=${code} retry ${transportAttempt}/${attempts} after ${delayMs / 1000}s`);
+      dbg("GROK-CLI", `pre-user-output transport code=${code} → retry ${transportAttempt}/${attempts} in ${delayMs}ms`);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+
+  async _peekSseTransientError(response) {
+    if (!response || !response.ok || !response.body) {
+      return { matched: null, transportError: null, replacementBody: null };
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    const chunks = [];
+    let text = "";
+    let matched = null;
+    let transportError = null;
+    let firstChunkTimer = null;
+    let sawUserOutput = false;
+    const firstOutputDeadlineAt = STREAM_FIRST_CHUNK_TIMEOUT_MS > 0
+      ? Date.now() + STREAM_FIRST_CHUNK_TIMEOUT_MS
+      : null;
+    const clearFirstChunkTimer = () => {
+      if (firstChunkTimer) {
+        clearTimeout(firstChunkTimer);
+        firstChunkTimer = null;
+      }
+    };
+
+    try {
+      while (text.length < GROK_CLI_SSE_PEEK_BYTES) {
+        let value;
+        let done = false;
+        const remainingMs = firstOutputDeadlineAt == null
+          ? null
+          : firstOutputDeadlineAt - Date.now();
+        if (remainingMs != null && remainingMs <= 0) {
+          throw makeFirstChunkTimeoutError(STREAM_FIRST_CHUNK_TIMEOUT_MS);
+        }
+
+        if (remainingMs != null) {
+          let timedOut = false;
+          const readPromise = reader.read().then(
+            (result) => ({ ok: true, result }),
+            (error) => ({ ok: false, error }),
+          );
+          const timeoutPromise = new Promise((resolve) => {
+            firstChunkTimer = setTimeout(() => {
+              timedOut = true;
+              resolve({ ok: false, error: makeFirstChunkTimeoutError(STREAM_FIRST_CHUNK_TIMEOUT_MS) });
+            }, remainingMs);
+          });
+          try {
+            const raced = await Promise.race([readPromise, timeoutPromise]);
+            if (!raced.ok) {
+              if (timedOut || raced.error?.code === "STREAM_FIRST_CHUNK_TIMEOUT") {
+                try { await reader.cancel(raced.error); } catch { /* noop */ }
+                await readPromise;
+              }
+              throw raced.error;
+            }
+            ({ done, value } = raced.result);
+          } finally {
+            clearFirstChunkTimer();
+          }
+        } else {
+          ({ done, value } = await reader.read());
+        }
+
+        if (done) break;
+        chunks.push(value);
+        text += decoder.decode(value, { stream: true });
+        const lowerText = text.toLowerCase();
+        if (GROK_CLI_SSE_TERMINAL_PATTERNS.some((pattern) => lowerText.includes(pattern))) break;
+        if (GROK_CLI_SSE_USER_OUTPUT_PATTERNS.some((pattern) => lowerText.includes(pattern))) {
+          sawUserOutput = true;
+          break;
+        }
+      }
+
+      if (!sawUserOutput) {
+        const lowerText = text.toLowerCase();
+        const sawTerminal = GROK_CLI_SSE_TERMINAL_PATTERNS.some((pattern) => lowerText.includes(pattern));
+        if (!sawTerminal) {
+          const empty = chunks.length === 0 && text.trim() === "";
+          const error = new Error(
+            empty
+              ? "upstream returned empty SSE body before first byte"
+              : "upstream closed SSE body before terminal event or user output",
+          );
+          error.code = empty ? "EMPTY_SSE_BODY" : "INCOMPLETE_SSE_BODY";
+          error.name = "TypeError";
+          matched = error.code;
+          transportError = error;
+        }
+      }
+    } catch (error) {
+      clearFirstChunkTimer();
+      dbg("GROK-CLI", `peek read error: code=${stableTransportCode(error)}`);
+      if (!sawUserOutput && isPreUserOutputTransportError(error)) {
+        matched = error.code || error.cause?.code || error.name || "terminated";
+        transportError = error;
+      }
+    } finally {
+      clearFirstChunkTimer();
+    }
+
+    if (matched) {
+      try { await reader.cancel(); } catch { /* noop */ }
+      try { reader.releaseLock(); } catch { /* noop */ }
+      return { matched, transportError, replacementBody: null };
+    }
+
+    reader.releaseLock();
+    const upstream = response.body;
+    let upstreamReader = null;
+    const replacementBody = new ReadableStream({
+      start(controller) {
+        for (const chunk of chunks) controller.enqueue(chunk);
+        upstreamReader = upstream.getReader();
+      },
+      async pull(controller) {
+        try {
+          const { done, value } = await upstreamReader.read();
+          if (done) {
+            controller.close();
+            return;
+          }
+          controller.enqueue(value);
+        } catch (error) {
+          controller.error(error);
+        }
+      },
+      cancel(reason) {
+        try { upstreamReader?.cancel(reason); } catch { /* noop */ }
+      },
+    });
+    return { matched: null, transportError: null, replacementBody };
   }
 }
 
