@@ -127,9 +127,46 @@ describe("Grok CLI pre-first-byte transport retry", () => {
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.retryTelemetry).toEqual({
+      pre_output_retry_attempted: 1,
+      pre_output_retry_recovered: 1,
+      pre_output_retry_exhausted: 0,
+    });
     const text = await new Response(result.response.body).text();
     expect(text).toContain("response.output_text.delta");
     expect(text).toContain("ok");
+  });
+
+  it("does not count a retry ending in an HTTP error as recovered", async () => {
+    const executor = new GrokCliExecutor();
+    executor.config = {
+      ...executor.config,
+      baseUrl: "https://cli-chat-proxy.grok.com/v1/responses",
+      retry: { 502: { attempts: 1, delayMs: 0 } },
+    };
+
+    fetchMock
+      .mockResolvedValueOnce(terminatedBeforeBytesResponse())
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "upstream unavailable" }), {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      }));
+
+    const result = await executor.execute({
+      model: "grok-4.5-high",
+      body: { model: "grok-4.5-high", input: "hi", stream: true },
+      stream: true,
+      credentials: { accessToken: "tok", connectionId: "c1" },
+      log: { debug: vi.fn(), warn: vi.fn() },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.response.status).toBe(500);
+    expect(result.retryTelemetry).toEqual({
+      pre_output_retry_attempted: 1,
+      pre_output_retry_recovered: 0,
+      pre_output_retry_exhausted: 0,
+    });
   });
 
   it("does not infinite-retry when every attempt dies before first byte", async () => {
@@ -157,6 +194,11 @@ describe("Grok CLI pre-first-byte transport retry", () => {
       });
 
       expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(result.retryTelemetry).toEqual({
+        pre_output_retry_attempted: 1,
+        pre_output_retry_recovered: 0,
+        pre_output_retry_exhausted: 1,
+      });
       expect(result.response.status).toBe(502);
       const body = await result.response.json();
       expect(body.error.message).toBe("upstream body terminated before first user output");
@@ -198,6 +240,57 @@ describe("Grok CLI pre-first-byte transport retry", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     await expect(new Response(result.response.body).text()).resolves.toContain("ok");
+  });
+
+  it("retries when only reasoning arrived before the body terminated", async () => {
+    const executor = new GrokCliExecutor();
+    executor.config = {
+      ...executor.config,
+      baseUrl: "https://cli-chat-proxy.grok.com/v1/responses",
+      retry: { 502: { attempts: 1, delayMs: 0 } },
+    };
+
+    // Reasoning summary is not user-visible output for retry purposes. If the
+    // socket dies after reasoning-only bytes, allow one pre-output transport retry.
+    fetchMock
+      .mockResolvedValueOnce(streamThenTerminateResponse([
+        "event: response.reasoning_summary_text.delta",
+        'data: {"type":"response.reasoning_summary_text.delta","delta":"still thinking"}',
+        "",
+      ].join("\n")))
+      .mockResolvedValueOnce(sseResponse([
+        "event: response.output_text.delta",
+        'data: {"type":"response.output_text.delta","delta":"ok"}',
+        "",
+      ].join("\n")));
+
+    const result = await executor.execute({
+      model: "grok-4.5-high",
+      body: { model: "grok-4.5-high", input: "hi", stream: true },
+      stream: true,
+      credentials: { accessToken: "tok", connectionId: "c1" },
+      log: { debug: vi.fn(), warn: vi.fn() },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await expect(new Response(result.response.body).text()).resolves.toContain("ok");
+  });
+
+  it("passes through a healthy reasoning-only stream after the bounded peek limit", async () => {
+    const executor = new GrokCliExecutor();
+    const reasoningText = "r".repeat(300 * 1024);
+    const response = sseResponse([
+      "event: response.reasoning_summary_text.delta",
+      `data: {"type":"response.reasoning_summary_text.delta","delta":"${reasoningText}"}`,
+      "",
+    ].join("\n"));
+
+    const peek = await executor._peekSseTransientError(response);
+
+    expect(peek.matched).toBeNull();
+    expect(peek.transportError).toBeNull();
+    expect(peek.replacementBody).toBeInstanceOf(ReadableStream);
+    await expect(new Response(peek.replacementBody).text()).resolves.toContain(reasoningText.slice(0, 128));
   });
 
   it("retries an empty 200-SSE body instead of returning false success", async () => {

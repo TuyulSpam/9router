@@ -19,6 +19,7 @@ import {
   STREAM_FIRST_CHUNK_TIMEOUT_MS,
   resolveRetryEntry,
 } from "../config/runtimeConfig.js";
+import { emptyPreOutputRetryTelemetry, sanitizePreOutputRetryTelemetry } from "../utils/retryTelemetry.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
 import { getConsistentMachineId } from "../shared/machineId.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
@@ -68,15 +69,16 @@ const GROK_CLI_FREEFORM_TOOL_PARAMETERS = {
   required: ["input"],
 };
 
+// Only truly user-visible / client-duplicable SSE counts as "user output".
+// Reasoning summary deltas are metadata-like for retry purposes: if the socket
+// dies after reasoning-only bytes, we still allow one pre-output transport retry.
 const GROK_CLI_SSE_USER_OUTPUT_PATTERNS = [
   "event: response.output_text.delta",
   "event: response.function_call_arguments.delta",
   "event: response.custom_tool_call_input.delta",
-  "event: response.reasoning_summary_text.delta",
   '"type":"response.output_text.delta"',
   '"type":"response.function_call_arguments.delta"',
   '"type":"response.custom_tool_call_input.delta"',
-  '"type":"response.reasoning_summary_text.delta"',
 ];
 const GROK_CLI_SSE_TERMINAL_PATTERNS = [
   "event: response.completed",
@@ -626,6 +628,7 @@ export class GrokCliExecutor extends BaseExecutor {
     const retryConfig = { ...DEFAULT_RETRY_CONFIG, ...this.config.retry };
     const transportRetry = resolveRetryEntry(retryConfig[502]);
     let transportAttempt = 0;
+    const retryTelemetry = emptyPreOutputRetryTelemetry();
 
     while (true) {
       const result = await super.execute(args);
@@ -638,21 +641,32 @@ export class GrokCliExecutor extends BaseExecutor {
             headers: result.response.headers,
           });
         }
-        return result;
+        if (transportAttempt > 0 && result.response?.ok) {
+          retryTelemetry.pre_output_retry_recovered = 1;
+        }
+        return {
+          ...result,
+          retryTelemetry: sanitizePreOutputRetryTelemetry(retryTelemetry),
+        };
       }
 
       const { attempts, delayMs } = transportRetry;
       const code = peek.matched || stableTransportCode(peek.transportError);
       if (transportAttempt >= attempts) {
+        retryTelemetry.pre_output_retry_exhausted = 1;
         args.log?.warn?.("RETRY", `GROK-CLI | pre-user-output transport code=${code} — retries exhausted (${transportAttempt}/${attempts})`);
         result.response = grokCliSseErrorResponse(
           HTTP_STATUS.BAD_GATEWAY,
           GROK_CLI_PRE_USER_OUTPUT_TRANSPORT_MESSAGE,
         );
-        return result;
+        return {
+          ...result,
+          retryTelemetry: sanitizePreOutputRetryTelemetry(retryTelemetry),
+        };
       }
 
       transportAttempt++;
+      retryTelemetry.pre_output_retry_attempted = transportAttempt;
       args.log?.debug?.("RETRY", `GROK-CLI | pre-user-output transport code=${code} retry ${transportAttempt}/${attempts} after ${delayMs / 1000}s`);
       dbg("GROK-CLI", `pre-user-output transport code=${code} → retry ${transportAttempt}/${attempts} in ${delayMs}ms`);
       await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -672,6 +686,7 @@ export class GrokCliExecutor extends BaseExecutor {
     let transportError = null;
     let firstChunkTimer = null;
     let sawUserOutput = false;
+    let reachedPeekLimit = false;
     const firstOutputDeadlineAt = STREAM_FIRST_CHUNK_TIMEOUT_MS > 0
       ? Date.now() + STREAM_FIRST_CHUNK_TIMEOUT_MS
       : null;
@@ -733,7 +748,8 @@ export class GrokCliExecutor extends BaseExecutor {
         }
       }
 
-      if (!sawUserOutput) {
+      reachedPeekLimit = text.length >= GROK_CLI_SSE_PEEK_BYTES;
+      if (!sawUserOutput && !reachedPeekLimit) {
         const lowerText = text.toLowerCase();
         const sawTerminal = GROK_CLI_SSE_TERMINAL_PATTERNS.some((pattern) => lowerText.includes(pattern));
         if (!sawTerminal) {

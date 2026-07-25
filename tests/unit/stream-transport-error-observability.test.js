@@ -126,6 +126,45 @@ describe("streaming request detail false-success fix", () => {
     expect(typeof onStreamComplete).toBe("function");
   });
 
+  it("persists only bounded pre-output retry counters on terminal success", async () => {
+    const retryTelemetry = {
+      pre_output_retry_attempted: 1,
+      pre_output_retry_recovered: 1,
+      pre_output_retry_exhausted: 0,
+    };
+    const { onStreamComplete, streamDetailId } = buildOnStreamComplete({
+      provider: "grok-cli",
+      model: "grok-4.5-high",
+      connectionId: "retry-conn",
+      requestStartTime: Date.now() - 1000,
+      body: { model: "grok-4.5-high", stream: true },
+      stream: true,
+      translatedBody: { model: "grok-4.5-high" },
+      finalBody: { model: "grok-4.5-high" },
+      clientRawRequest: { endpoint: "/v1/responses" },
+      retryTelemetry,
+      reqTag: "retry-success",
+      log: { line: vi.fn(), errorLine: vi.fn() },
+    });
+
+    onStreamComplete(
+      { content: "hello", thinking: null },
+      { prompt_tokens: 10, completion_tokens: 4 },
+      Date.now() - 500,
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(saveRequestDetailMock.mock.calls.at(-1)[0]).toMatchObject({
+      id: streamDetailId,
+      status: "success",
+      response: {
+        type: "streaming",
+        ...retryTelemetry,
+      },
+    });
+  });
+
   it("does not let a late transport error overwrite a completed success detail", async () => {
     const { onStreamComplete, onStreamError, streamDetailId } = buildOnStreamComplete({
       provider: "codex",

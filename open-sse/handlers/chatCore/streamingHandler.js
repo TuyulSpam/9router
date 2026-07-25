@@ -9,6 +9,7 @@ import { buildRequestDetail, extractRequestConfig, saveUsageStats, formatDoneLin
 import { saveRequestDetail } from "@/lib/usageDb.js";
 import { SSE_HEADERS_CORS as SSE_HEADERS } from "../../utils/sseConstants.js";
 import { serializeStreamTransportError } from "../../utils/streamTransportError.js";
+import { sanitizePreOutputRetryTelemetry } from "../../utils/retryTelemetry.js";
 
 // Codex returns Responses API SSE → which client format to translate INTO, by request sourceFormat.
 // Gemini-family all map to ANTIGRAVITY decoder; unknown sources fall back to OPENAI.
@@ -128,8 +129,9 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
 /**
  * Build onStreamComplete callback for streaming usage tracking.
  */
-export function buildOnStreamComplete({ provider, model, connectionId, apiKey, requestStartTime, body, stream, finalBody, translatedBody, clientRawRequest, pxpipe, reqTag, log }) {
+export function buildOnStreamComplete({ provider, model, connectionId, apiKey, requestStartTime, body, stream, finalBody, translatedBody, clientRawRequest, pxpipe, reqTag, log, retryTelemetry }) {
   const streamDetailId = `${Date.now()}-${Math.random().toString(36).slice(2, 11)}`;
+  const safeRetryTelemetry = sanitizePreOutputRetryTelemetry(retryTelemetry) || {};
   // Terminal guard: complete and transport-error both write the same detail id.
   // Whichever settles first wins so a late abort cannot clobber a finished stream
   // and a late flush cannot turn a terminated socket into a false success.
@@ -153,7 +155,7 @@ export function buildOnStreamComplete({ provider, model, connectionId, apiKey, r
       request: extractRequestConfig(body, stream),
       providerRequest: finalBody || translatedBody || null,
       providerResponse: safeContent,
-      response: { content: safeContent, thinking: safeThinking, type: "streaming" },
+      response: { content: safeContent, thinking: safeThinking, type: "streaming", ...safeRetryTelemetry },
       pxpipe,
       status: "success"
     }, { id: streamDetailId })).catch(err => {
@@ -194,6 +196,7 @@ export function buildOnStreamComplete({ provider, model, connectionId, apiKey, r
         cause: transport.cause,
         bytesRead: transport.bytesRead,
         bytesWritten: transport.bytesWritten,
+        ...safeRetryTelemetry,
       },
       pxpipe,
       status: "error"
