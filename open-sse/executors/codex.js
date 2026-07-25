@@ -9,7 +9,7 @@ import { normalizeResponsesInput } from "../translator/formats/responsesApi.js";
 import { fetchImageAsBase64 } from "../translator/concerns/image.js";
 import { resolveOpenAiEffort } from "../translator/concerns/thinkingUnified.js";
 import { getModelUpstreamId } from "../config/providerModels.js";
-import { DEFAULT_RETRY_CONFIG, HTTP_STATUS, resolveRetryEntry } from "../config/runtimeConfig.js";
+import { DEFAULT_RETRY_CONFIG, HTTP_STATUS, STREAM_FIRST_CHUNK_TIMEOUT_MS, resolveRetryEntry } from "../config/runtimeConfig.js";
 import { dbg } from "../utils/debugLog.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
 
@@ -19,11 +19,54 @@ const CODEX_SSE_ACCOUNT_FALLBACK_PATTERNS = ["selected model is at capacity", "m
 const CODEX_SSE_USER_OUTPUT_PATTERNS = [
   "event: response.output_text.delta",
   "event: response.function_call_arguments.delta",
+  "event: response.custom_tool_call_input.delta",
+  "event: response.reasoning_summary_text.delta",
   '"type":"response.output_text.delta"',
   '"type":"response.function_call_arguments.delta"',
+  '"type":"response.custom_tool_call_input.delta"',
+  '"type":"response.reasoning_summary_text.delta"',
 ];
+// Terminal SSE events mean the upstream stream finished intentionally. Metadata
+// prefixes without one of these (or user output) are incomplete and retryable.
+const CODEX_SSE_TERMINAL_PATTERNS = [
+  "event: response.completed",
+  "event: response.done",
+  "event: response.failed",
+  "event: error",
+  '"type":"response.completed"',
+  '"type":"response.done"',
+  '"type":"response.failed"',
+  '"type":"error"',
+];
+const CODEX_PRE_USER_OUTPUT_TRANSPORT_MESSAGE = "upstream body terminated before first user output";
 const CODEX_SSE_PEEK_BYTES = 256 * 1024;
 const CODEX_MODEL_CAPACITY_MESSAGE = "Selected model is at capacity. Please try a different model.";
+
+// Body transport failures that happen before any user-visible SSE output are
+// still recoverable while we are peeking. After output_text / tool deltas are
+// seen we fail-fast to avoid duplicating client-visible tokens.
+function isPreFirstByteTransportError(error) {
+  if (!error) return false;
+  if (
+    error.code === "STREAM_FIRST_CHUNK_TIMEOUT"
+    || error.code === "EMPTY_SSE_BODY"
+    || error.code === "INCOMPLETE_SSE_BODY"
+  ) return true;
+  if (error.name === "TimeoutError" && /first[- ]byte|first[- ]chunk/i.test(String(error.message || ""))) return true;
+  const msg = String(error.message || "").toLowerCase();
+  const code = String(error.code || error.cause?.code || "");
+  if (error.name === "TypeError" && msg.includes("terminated")) return true;
+  if (code === "UND_ERR_SOCKET" || code === "ECONNRESET" || code === "EPIPE" || code === "ETIMEDOUT") return true;
+  if (msg.includes("other side closed") || msg.includes("socket hang up") || msg.includes("econnreset") || msg.includes("epipe")) return true;
+  return false;
+}
+
+function makeFirstChunkTimeoutError(timeoutMs = STREAM_FIRST_CHUNK_TIMEOUT_MS) {
+  const err = new Error(`stream first-byte timeout after ${timeoutMs}ms`);
+  err.code = "STREAM_FIRST_CHUNK_TIMEOUT";
+  err.name = "TimeoutError";
+  return err;
+}
 
 // Server-generated item id prefixes that Codex /responses cannot resolve when store=false
 const SERVER_ID_PATTERN = /^(rs|fc|resp|msg)_/;
@@ -267,11 +310,15 @@ export class CodexExecutor extends BaseExecutor {
       await this.prefetchImages(args.body);
     }
 
-    // Retry loop for SSE-level overloaded errors (200 OK body contains event: error)
-    // Reuses 503 retry config — same semantic: upstream temporarily unavailable
+    // Retry loop for:
+    // 1) SSE-level overloaded errors (200 OK body contains event: error) → 503 config
+    // 2) pre-user-output body transport death/empty body during peek → 502 config
+    // Once user-visible output is observed we do not auto-retry.
     const retryConfig = { ...DEFAULT_RETRY_CONFIG, ...this.config.retry };
-    const { attempts, delayMs } = resolveRetryEntry(retryConfig[503]);
-    let attempt = 0;
+    const overloadRetry = resolveRetryEntry(retryConfig[503]);
+    const transportRetry = resolveRetryEntry(retryConfig[502]);
+    let overloadAttempt = 0;
+    let transportAttempt = 0;
     while (true) {
       const result = await super.execute(args);
       const peek = await this._peekSseTransientError(result.response);
@@ -291,33 +338,106 @@ export class CodexExecutor extends BaseExecutor {
         result.response = codexSseErrorResponse(HTTP_STATUS.SERVICE_UNAVAILABLE, peek.message || CODEX_MODEL_CAPACITY_MESSAGE);
         return result;
       }
-      if (attempt >= attempts) {
-        args.log?.warn?.("RETRY", `CODEX | SSE overloaded "${peek.matched}" — retries exhausted (${attempt}/${attempts})`);
+
+      // Pre-user-output transport death/empty body: recoverable only before user output.
+      if (peek.transportError) {
+        const { attempts, delayMs } = transportRetry;
+        if (transportAttempt >= attempts) {
+          // Log only a stable transport code/name — never raw undici messages that may
+          // embed host/credential fragments from intermediate proxy layers.
+          const code = peek.matched || peek.transportError?.code || peek.transportError?.name || "terminated";
+          args.log?.warn?.("RETRY", `CODEX | pre-user-output transport code=${code} — retries exhausted (${transportAttempt}/${attempts})`);
+          // Keep client-facing body generic; detailed transport cause stays in logs/DB via observability path.
+          result.response = codexSseErrorResponse(HTTP_STATUS.BAD_GATEWAY, CODEX_PRE_USER_OUTPUT_TRANSPORT_MESSAGE);
+          return result;
+        }
+        transportAttempt++;
+        const code = peek.matched || peek.transportError?.code || peek.transportError?.name || "terminated";
+        args.log?.debug?.("RETRY", `CODEX | pre-user-output transport code=${code} retry ${transportAttempt}/${attempts} after ${delayMs / 1000}s`);
+        dbg("CODEX", `pre-user-output transport code=${code} → retry ${transportAttempt}/${attempts} in ${delayMs}ms`);
+        await new Promise(r => setTimeout(r, delayMs));
+        continue;
+      }
+
+      const { attempts, delayMs } = overloadRetry;
+      if (overloadAttempt >= attempts) {
+        args.log?.warn?.("RETRY", `CODEX | SSE overloaded "${peek.matched}" — retries exhausted (${overloadAttempt}/${attempts})`);
         result.response = codexSseErrorResponse(HTTP_STATUS.SERVICE_UNAVAILABLE, peek.message || peek.matched);
         return result;
       }
-      attempt++;
-      args.log?.debug?.("RETRY", `CODEX | SSE "${peek.matched}" retry ${attempt}/${attempts} after ${delayMs / 1000}s`);
-      dbg("CODEX", `SSE overloaded "${peek.matched}" → retry ${attempt}/${attempts} in ${delayMs}ms`);
+      overloadAttempt++;
+      args.log?.debug?.("RETRY", `CODEX | SSE "${peek.matched}" retry ${overloadAttempt}/${attempts} after ${delayMs / 1000}s`);
+      dbg("CODEX", `SSE overloaded "${peek.matched}" → retry ${overloadAttempt}/${attempts} in ${delayMs}ms`);
       await new Promise(r => setTimeout(r, delayMs));
     }
   }
 
-  // Peek first N bytes of SSE body to detect upstream transient errors.
-  // Returns { matched: string|null, message: string|null, accountFallback: boolean, replacementBody: ReadableStream|null }.
-  // Caller must use replacementBody when no error matched (original body has been read).
+  // Peek first N bytes of SSE body to detect upstream transient errors / pre-user-output
+  // transport death. Returns {
+  //   matched, message, accountFallback, transportError, replacementBody
+  // }. Caller must use replacementBody when no error matched (original body has been read).
   async _peekSseTransientError(response) {
-    if (!response || !response.ok || !response.body) return { matched: null, message: null, accountFallback: false, replacementBody: null };
+    if (!response || !response.ok || !response.body) {
+      return { matched: null, message: null, accountFallback: false, transportError: null, replacementBody: null };
+    }
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     const chunks = [];
     let text = "";
     let matched = null;
     let accountFallback = false;
+    let transportError = null;
+    let firstChunkTimer = null;
+    let sawFirstChunk = false;
+    let sawUserOutput = false;
+    const clearFirstChunkTimer = () => {
+      if (firstChunkTimer) {
+        clearTimeout(firstChunkTimer);
+        firstChunkTimer = null;
+      }
+    };
     try {
       while (text.length < CODEX_SSE_PEEK_BYTES) {
-        const { done, value } = await reader.read();
+        // First-byte watchdog must live in peek: this path drains body bytes
+        // before pipeWithDisconnect can arm its own timer.
+        let value;
+        let done = false;
+        if (!sawFirstChunk && STREAM_FIRST_CHUNK_TIMEOUT_MS > 0) {
+          let timedOut = false;
+          // Attach a no-op catch so a late cancel of reader.read() cannot surface
+          // as an unhandled rejection after the timeout branch wins Promise.race.
+          const readPromise = reader.read().then(
+            (result) => ({ ok: true, result }),
+            (error) => ({ ok: false, error }),
+          );
+          const timeoutPromise = new Promise((resolve) => {
+            firstChunkTimer = setTimeout(() => {
+              timedOut = true;
+              resolve({ ok: false, error: makeFirstChunkTimeoutError(STREAM_FIRST_CHUNK_TIMEOUT_MS) });
+            }, STREAM_FIRST_CHUNK_TIMEOUT_MS);
+          });
+          try {
+            const raced = await Promise.race([readPromise, timeoutPromise]);
+            if (!raced.ok) {
+              if (timedOut || raced.error?.code === "STREAM_FIRST_CHUNK_TIMEOUT") {
+                try { await reader.cancel(raced.error); } catch { /* noop */ }
+                // Drain the pending read settlement after cancel so it never becomes unhandled.
+                await readPromise;
+              }
+              throw raced.error;
+            }
+            ({ done, value } = raced.result);
+          } finally {
+            clearFirstChunkTimer();
+          }
+        } else {
+          ({ done, value } = await reader.read());
+        }
         if (done) break;
+        if (!sawFirstChunk) {
+          sawFirstChunk = true;
+          clearFirstChunkTimer();
+        }
         chunks.push(value);
         text += decoder.decode(value, { stream: true });
         const lowerText = text.toLowerCase();
@@ -325,16 +445,56 @@ export class CodexExecutor extends BaseExecutor {
         if (accountHit) { matched = accountHit; accountFallback = true; break; }
         const retryHit = CODEX_SSE_RETRY_PATTERNS.find(p => lowerText.includes(p));
         if (retryHit) { matched = retryHit; break; }
-        if (CODEX_SSE_USER_OUTPUT_PATTERNS.some(p => lowerText.includes(p))) break;
+        if (CODEX_SSE_USER_OUTPUT_PATTERNS.some(p => lowerText.includes(p))) {
+          sawUserOutput = true;
+          break;
+        }
+      }
+
+      // Incomplete 200-SSE bodies (empty, or metadata-only without a terminal event)
+      // are not successful streams. Treat them as pre-user-output transport failures
+      // so the outer loop can retry via 502. Terminal-only streams still release.
+      if (!matched && !sawUserOutput) {
+        const lowerText = text.toLowerCase();
+        const sawTerminal = CODEX_SSE_TERMINAL_PATTERNS.some((p) => lowerText.includes(p));
+        if (!sawTerminal) {
+          const incomplete = chunks.length === 0 && text.trim() === "";
+          const emptyErr = new Error(
+            incomplete
+              ? "upstream returned empty SSE body before first byte"
+              : "upstream closed SSE body before terminal event or user output"
+          );
+          emptyErr.code = incomplete ? "EMPTY_SSE_BODY" : "INCOMPLETE_SSE_BODY";
+          emptyErr.name = "TypeError";
+          matched = emptyErr.code;
+          transportError = emptyErr;
+        }
       }
     } catch (e) {
+      clearFirstChunkTimer();
       dbg("CODEX", `peek read error: ${e.message}`);
+      // Recoverable while no user-visible output has been observed yet.
+      // Metadata-only prefixes are still safe to discard and retry.
+      if (!sawUserOutput && isPreFirstByteTransportError(e)) {
+        matched = e.code || e.name || "terminated";
+        transportError = e;
+      }
+    } finally {
+      clearFirstChunkTimer();
     }
 
     if (matched) {
       try { await reader.cancel(); } catch { /* noop */ }
       try { reader.releaseLock(); } catch { /* noop */ }
-      return { matched, message: extractSseErrorMessage(text, matched), accountFallback, replacementBody: null };
+      return {
+        matched,
+        message: transportError
+          ? (transportError.message || matched)
+          : extractSseErrorMessage(text, matched),
+        accountFallback,
+        transportError,
+        replacementBody: null,
+      };
     }
 
     reader.releaseLock();
@@ -358,7 +518,7 @@ export class CodexExecutor extends BaseExecutor {
         try { upstreamReader?.cancel(reason); } catch { /* noop */ }
       },
     });
-    return { matched: null, message: null, accountFallback: false, replacementBody };
+    return { matched: null, message: null, accountFallback: false, transportError: null, replacementBody };
   }
 
   // Parse Codex usage_limit_reached to extract precise resetsAtMs; fallback to default otherwise
