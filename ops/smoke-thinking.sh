@@ -20,6 +20,11 @@ EXPECTED_AG_MODE="${EXPECTED_AG_MODE:-xhigh}"
 EXPECTED_AG_LEVEL="${EXPECTED_AG_LEVEL:-high}"
 EXPECTED_GROK_MODE="${EXPECTED_GROK_MODE:-xhigh}"
 EXPECTED_GROK_EFFORT="${EXPECTED_GROK_EFFORT:-xhigh}"
+# Kelas-berat's claude member (cc/claude-fable-5) carries thinking as a Claude
+# budget, not reasoning.effort. providerThinking.claude mode "high" maps to
+# effortToBudget("high") = 24576 tokens (see open-sse/translator/concerns/thinking.js).
+EXPECTED_CLAUDE_MODE="${EXPECTED_CLAUDE_MODE:-high}"
+EXPECTED_CLAUDE_BUDGET="${EXPECTED_CLAUDE_BUDGET:-24576}"
 
 for command_name in curl node pm2 sqlite3; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
@@ -105,9 +110,16 @@ KELAS_START="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
 KELAS_PAYLOAD="$(node -e 'const marker=process.argv[1]; console.log(JSON.stringify({model:"Kelas-berat",input:`Balas tepat OK. Marker: ${marker}`,reasoning:{effort:"medium",summary:"auto"},max_output_tokens:32,stream:false}))' "$KELAS_MARKER")"
 post_response "$KELAS_PAYLOAD" "$TMP_DIR/kelas.json"
 
-KELAS_QUERY="SELECT provider || '|' || model || '|' || json_extract(data,'$.request.reasoning.effort') FROM requestDetails WHERE timestamp >= '$KELAS_START' AND status='success' AND data LIKE '%$KELAS_MARKER%' AND json_extract(data,'$.request.reasoning.effort') IS NOT NULL ORDER BY timestamp DESC LIMIT 1;"
+# Kelas-berat is a fallback combo (cc/claude-fable-5, cx/gpt-5.6-sol). Both
+# members apply provider thinking, but in DIFFERENT shapes: codex/grok carry
+# request.reasoning.effort (enum), while claude carries it as a Claude thinking
+# budget on the upstream request (providerRequest.thinking.budget_tokens). So we
+# wait for ANY successful upstream for this marker, then assert whichever signal
+# matches the member that served it. COALESCE keeps the concatenated row
+# non-NULL when reasoning.effort is absent ('x' || NULL = NULL in SQLite).
+KELAS_QUERY="SELECT provider || '|' || model || '|' || COALESCE(json_extract(data,'$.request.reasoning.effort'),'') FROM requestDetails WHERE timestamp >= '$KELAS_START' AND status='success' AND data LIKE '%$KELAS_MARKER%' ORDER BY timestamp DESC LIMIT 1;"
 if ! KELAS_ROW="$(wait_for_value "$KELAS_QUERY")"; then
-  echo "ERROR: no observable Kelas-berat upstream effort found" >&2
+  echo "ERROR: no successful Kelas-berat upstream observed" >&2
   exit 1
 fi
 IFS='|' read -r KELAS_PROVIDER KELAS_MODEL KELAS_EFFORT <<< "$KELAS_ROW"
@@ -120,17 +132,35 @@ case "$KELAS_PROVIDER" in
     KELAS_EXPECTED_EFFORT="$EXPECTED_GROK_EFFORT"
     KELAS_PROVIDER_LABEL="grok_cli"
     ;;
+  claude)
+    # Claude thinking is a budget, not an effort enum. Assert the upstream
+    # request carried providerThinking.claude ("high" → budget_tokens 24576).
+    KELAS_BUDGET_QUERY="SELECT json_extract(data,'$.providerRequest.thinking.budget_tokens') FROM requestDetails WHERE timestamp >= '$KELAS_START' AND status='success' AND provider='claude' AND data LIKE '%$KELAS_MARKER%' AND json_extract(data,'$.providerRequest.thinking.budget_tokens') IS NOT NULL ORDER BY timestamp DESC LIMIT 1;"
+    if ! KELAS_BUDGET="$(wait_for_value "$KELAS_BUDGET_QUERY")"; then
+      echo "ERROR: Kelas-berat claude member has no observable thinking budget_tokens" >&2
+      exit 1
+    fi
+    if [[ "$KELAS_BUDGET" != "$EXPECTED_CLAUDE_BUDGET" ]]; then
+      echo "ERROR: Kelas-berat expected claude/$EXPECTED_CLAUDE_MODE budget=$EXPECTED_CLAUDE_BUDGET, got $KELAS_MODEL/$KELAS_BUDGET" >&2
+      exit 1
+    fi
+    printf 'kelas_berat_route=%s/%s\n' "$KELAS_PROVIDER" "$KELAS_MODEL"
+    printf 'kelas_berat_claude_budget=%s (mode %s)\n' "$KELAS_BUDGET" "$EXPECTED_CLAUDE_MODE"
+    KELAS_PROVIDER_LABEL=""
+    ;;
   *)
     echo "ERROR: Kelas-berat selected unexpected provider $KELAS_PROVIDER/$KELAS_MODEL" >&2
     exit 1
     ;;
 esac
-if [[ "$KELAS_EFFORT" != "$KELAS_EXPECTED_EFFORT" ]]; then
-  echo "ERROR: Kelas-berat expected $KELAS_PROVIDER/$KELAS_EXPECTED_EFFORT, got $KELAS_PROVIDER/$KELAS_MODEL/$KELAS_EFFORT" >&2
-  exit 1
+if [[ -n "$KELAS_PROVIDER_LABEL" ]]; then
+  if [[ "$KELAS_EFFORT" != "$KELAS_EXPECTED_EFFORT" ]]; then
+    echo "ERROR: Kelas-berat expected $KELAS_PROVIDER/$KELAS_EXPECTED_EFFORT, got $KELAS_PROVIDER/$KELAS_MODEL/$KELAS_EFFORT" >&2
+    exit 1
+  fi
+  printf 'kelas_berat_route=%s/%s\n' "$KELAS_PROVIDER" "$KELAS_MODEL"
+  printf 'kelas_berat_%s_effort=%s\n' "$KELAS_PROVIDER_LABEL" "$KELAS_EFFORT"
 fi
-printf 'kelas_berat_route=%s/%s\n' "$KELAS_PROVIDER" "$KELAS_MODEL"
-printf 'kelas_berat_%s_effort=%s\n' "$KELAS_PROVIDER_LABEL" "$KELAS_EFFORT"
 
 AG_MARKER="ag-thinking-smoke-$(date +%s%N)"
 AG_START="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
