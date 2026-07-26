@@ -6,8 +6,39 @@ import { promisify } from "util";
 import fs from "fs/promises";
 import path from "path";
 import os from "os";
+import { getCombos } from "@/lib/localDb";
+import { getModelsByProviderId } from "open-sse/config/providerModels.js";
+import { resolveClaudeSuggestedModels, smokeTestClaudeMessages } from "@/lib/cli-tools/claudeSetup.js";
 
 const execAsync = promisify(exec);
+
+const EMPTY_SUGGESTED = { opus: null, sonnet: null, haiku: null };
+
+// Claude Code speaks the Anthropic format → the cc (Claude) provider models,
+// plus any combos (the auto-fallback flagship), are the valid default targets.
+async function loadClaudeCatalog() {
+  const ids = [];
+  const seen = new Set();
+  const push = (id) => {
+    if (id && !seen.has(id)) {
+      seen.add(id);
+      ids.push(id);
+    }
+  };
+  try {
+    for (const m of getModelsByProviderId("claude") || []) push(`cc/${m.id}`);
+  } catch {
+    // soft — catalog enrichment only
+  }
+  let combos = [];
+  try {
+    combos = await getCombos();
+  } catch {
+    // soft — combos optional
+  }
+  for (const c of combos) if (c?.name) push(c.name);
+  return { ids };
+}
 
 // Get claude settings path based on OS
 const getClaudeSettingsPath = () => {
@@ -60,17 +91,25 @@ export async function GET() {
         installed: false,
         settings: null,
         message: "Claude CLI is not installed",
+        suggestedModels: EMPTY_SUGGESTED,
       });
     }
 
     const settings = await readSettings();
     const has9Router = !!(settings?.env?.ANTHROPIC_BASE_URL);
 
+    const { ids } = await loadClaudeCatalog();
+    const suggestedModels = resolveClaudeSuggestedModels({
+      models: ids,
+      currentEnv: settings?.env || {},
+    });
+
     return NextResponse.json({
       installed: true,
       settings: settings,
       has9Router: has9Router,
       settingsPath: getClaudeSettingsPath(),
+      suggestedModels,
     });
   } catch (error) {
     console.log("Error checking claude settings:", error);
@@ -84,13 +123,47 @@ export async function GET() {
 // POST - Backup old fields and write new settings
 export async function POST(request) {
   try {
-    const { env } = await request.json();
-    
+    const { env, probeOnly = false } = await request.json();
+
     if (!env || typeof env !== "object") {
       return NextResponse.json(
         { error: "Invalid env object" },
         { status: 400 }
       );
+    }
+
+    // Test Health — live smoke test without writing ~/.claude/settings.json.
+    // Probes the native Anthropic /v1/messages path Claude Code actually uses
+    // (not OpenAI /chat/completions), so green reflects the real client path.
+    // Sonnet is the most representative tier, falling back to Opus/Haiku.
+    if (probeOnly) {
+      const baseUrl = env.ANTHROPIC_BASE_URL;
+      const apiKey = env.ANTHROPIC_AUTH_TOKEN || "";
+      const model =
+        env.ANTHROPIC_DEFAULT_SONNET_MODEL ||
+        env.ANTHROPIC_DEFAULT_OPUS_MODEL ||
+        env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
+      if (!baseUrl || !model) {
+        return NextResponse.json(
+          { error: "baseUrl and a default model are required for probeOnly" },
+          { status: 400 }
+        );
+      }
+      const smoke = await smokeTestClaudeMessages({ baseUrl, apiKey, model });
+      return NextResponse.json({
+        success: true,
+        probeOnly: true,
+        message: smoke.ok
+          ? "Smoke test healthy (config not written)"
+          : "Smoke test failed (config not written)",
+        smoke,
+        health: {
+          status: smoke.ok ? "healthy" : "unhealthy",
+          chat: smoke.chat,
+          latencyMs: smoke.latencyMs,
+          error: smoke.error,
+        },
+      });
     }
 
     const settingsPath = getClaudeSettingsPath();
